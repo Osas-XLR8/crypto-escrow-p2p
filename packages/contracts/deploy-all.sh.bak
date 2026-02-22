@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --------------------
+# Config via env vars
+# --------------------
+RPC="${RPC:-http://127.0.0.1:8545}"
+PRIVATE_KEY="${PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
+
+# Mock token params
+NAME="${NAME:-Tether USD}"
+SYMBOL="${SYMBOL:-USDT}"
+DECIMALS="${DECIMALS:-6}"
+
+# Mint + approve amounts (USDT has 6 decimals)
+MINT_AMOUNT="${MINT_AMOUNT:-1000000000}"    # 1000 USDT (1000 * 10^6)
+APPROVE_AMOUNT="${APPROVE_AMOUNT:-1000000000}"
+
+# Optional override (defaults to deployer)
+BACKEND_SIGNER="${BACKEND_SIGNER:-}"
+
+# Where to save outputs
+OUT_DIR="${OUT_DIR:-./.deployments}"
+mkdir -p "$OUT_DIR"
+USDT_ADDR_FILE="$OUT_DIR/mockusdt.address"
+ESCROW_ADDR_FILE="$OUT_DIR/escrow.address"
+ENV_FILE="$OUT_DIR/.env"
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: '$1' not found in WSL PATH"; exit 1; }; }
+need forge
+need cast
+need awk
+
+# Returns 0 (true) if address has contract code on this RPC
+has_code() {
+  local addr="$1"
+  local code
+  code="$(cast code --rpc-url "$RPC" "$addr" 2>/dev/null || echo "0x")"
+  [[ "$code" != "0x" && "$code" != "0x0" && ${#code} -gt 2 ]]
+}
+
+echo "==> RPC: $RPC"
+echo "==> Building..."
+forge build >/dev/null
+
+DEPLOYER="$(cast wallet address --private-key "$PRIVATE_KEY")"
+SIGNER="${BACKEND_SIGNER:-$DEPLOYER}"
+
+echo "==> Deployer:       $DEPLOYER"
+echo "==> Backend signer: $SIGNER"
+
+# --------------------
+# Deploy MockUSDT
+# --------------------
+echo "==> Deploying MockUSDT..."
+USDT_OUT="$(forge create \
+  --rpc-url "$RPC" \
+  --broadcast \
+  --private-key "$PRIVATE_KEY" \
+  src/MockUSDT.sol:MockUSDT \
+  --constructor-args "$NAME" "$SYMBOL" "$DECIMALS")"
+
+echo "$USDT_OUT"
+
+USDT_ADDR="$(echo "$USDT_OUT" | awk '
+/Deployed to:/ {print $3; exit}
+/Contract Address:/ {print $3; exit}
+')"
+
+if [[ -z "${USDT_ADDR:-}" ]]; then
+  echo "ERROR: could not parse MockUSDT address" >&2
+  exit 1
+fi
+
+echo -n "$USDT_ADDR" > "$USDT_ADDR_FILE"
+echo "==> MockUSDT: $USDT_ADDR (saved to $USDT_ADDR_FILE)"
+
+# --------------------
+# Deploy Escrow
+# constructor(address,address)
+# We pass: (SIGNER, USDT_ADDR)
+# --------------------
+echo "==> Deploying P2PEscrowTestable..."
+ESCROW_OUT="$(forge create \
+  --rpc-url "$RPC" \
+  --broadcast \
+  --private-key "$PRIVATE_KEY" \
+  src/P2PEscrowTestable.sol:P2PEscrowTestable \
+  --constructor-args "$SIGNER" "$USDT_ADDR")"
+
+echo "$ESCROW_OUT"
+
+ESCROW_ADDR="$(echo "$ESCROW_OUT" | awk '
+/Deployed to:/ {print $3; exit}
+/Contract Address:/ {print $3; exit}
+')"
+
+if [[ -z "${ESCROW_ADDR:-}" ]]; then
+  echo "ERROR: could not parse Escrow address" >&2
+  exit 1
+fi
+
+echo -n "$ESCROW_ADDR" > "$ESCROW_ADDR_FILE"
+echo "==> Escrow:   $ESCROW_ADDR (saved to $ESCROW_ADDR_FILE)"
+
+# --------------------
+# Mint + Approve (always on MockUSDT)
+# --------------------
+echo "==> Minting $MINT_AMOUNT units to deployer (MockUSDT)..."
+cast send --rpc-url "$RPC" --private-key "$PRIVATE_KEY" \
+  "$USDT_ADDR" "mint(address,uint256)" "$DEPLOYER" "$MINT_AMOUNT" >/dev/null
+
+echo "==> Approving escrow for $APPROVE_AMOUNT units (MockUSDT)..."
+cast send --rpc-url "$RPC" --private-key "$PRIVATE_KEY" \
+  "$USDT_ADDR" "approve(address,uint256)" "$ESCROW_ADDR" "$APPROVE_AMOUNT" >/dev/null
+
+# --------------------
+# Escrow sanity (do NOT panic if USDT() has no code)
+# --------------------
+echo
+echo "Escrow sanity:"
+ESCROW_USDT="$(cast call --rpc-url "$RPC" "$ESCROW_ADDR" "USDT()(address)" 2>/dev/null || echo "")"
+ESCROW_SIGNER="$(cast call --rpc-url "$RPC" "$ESCROW_ADDR" "backendSigner()(address)" 2>/dev/null || echo "")"
+ESCROW_TEST_TOKEN="$(cast call --rpc-url "$RPC" "$ESCROW_ADDR" "TEST_TOKEN()(address)" 2>/dev/null || true)"
+
+echo "USDT():          ${ESCROW_USDT:-<n/a>}"
+echo "TEST_TOKEN():    ${ESCROW_TEST_TOKEN:-<n/a>}"
+echo "backendSigner(): ${ESCROW_SIGNER:-<n/a>}"
+
+# Choose which token address we will use for “escrow token checks”
+# Priority:
+#  1) USDT() if it actually has code on this local chain
+#  2) TEST_TOKEN() if it has code
+#  3) fallback to deployed MockUSDT
+ESCROW_TOKEN="$USDT_ADDR"
+if [[ -n "${ESCROW_USDT:-}" ]] && has_code "$ESCROW_USDT"; then
+  ESCROW_TOKEN="$ESCROW_USDT"
+elif [[ -n "${ESCROW_TEST_TOKEN:-}" ]] && has_code "$ESCROW_TEST_TOKEN"; then
+  ESCROW_TOKEN="$ESCROW_TEST_TOKEN"
+fi
+
+# Fail fast if backendSigner isn't what we expect (only if we could read it)
+if [[ -n "${ESCROW_SIGNER:-}" ]] && [[ "${ESCROW_SIGNER,,}" != "${SIGNER,,}" ]]; then
+  echo "ERROR: backendSigner mismatch. Expected $SIGNER got $ESCROW_SIGNER" >&2
+  exit 1
+fi
+
+# Warn (don’t fail) if USDT() isn’t the MockUSDT
+if [[ -n "${ESCROW_USDT:-}" ]] && [[ "${ESCROW_USDT,,}" != "${USDT_ADDR,,}" ]]; then
+  echo "WARNING: USDT() is not MockUSDT. (This is OK if your contract uses TEST_TOKEN for local testing.)" >&2
+fi
+
+# --------------------
+# Save .env outputs
+# --------------------
+cat > "$ENV_FILE" <<ENV
+RPC=$RPC
+USDT_ADDR=$USDT_ADDR
+ESCROW_ADDR=$ESCROW_ADDR
+DEPLOYER=$DEPLOYER
+BACKEND_SIGNER=$SIGNER
+ESCROW_TOKEN=$ESCROW_TOKEN
+ENV
+
+echo
+echo "✅ Done."
+echo "USDT_ADDR:      $USDT_ADDR"
+echo "ESCROW_ADDR:    $ESCROW_ADDR"
+echo "DEPLOYER:       $DEPLOYER"
+echo "BACKEND_SIGNER: $SIGNER"
+echo "ESCROW_TOKEN:   $ESCROW_TOKEN"
+echo "Saved:          $ENV_FILE"
+echo
+
+echo "Quick checks (MockUSDT):"
+cast call --rpc-url "$RPC" "$USDT_ADDR" "name()(string)"
+cast call --rpc-url "$RPC" "$USDT_ADDR" "symbol()(string)"
+cast call --rpc-url "$RPC" "$USDT_ADDR" "decimals()(uint8)"
+cast call --rpc-url "$RPC" "$USDT_ADDR" "totalSupply()(uint256)"
+cast call --rpc-url "$RPC" "$USDT_ADDR" "balanceOf(address)(uint256)" "$DEPLOYER"
+cast call --rpc-url "$RPC" "$USDT_ADDR" "allowance(address,address)(uint256)" "$DEPLOYER" "$ESCROW_ADDR"
+
+echo
+echo "Quick checks (Escrow token only if it has code):"
+if has_code "$ESCROW_TOKEN"; then
+  cast call --rpc-url "$RPC" "$ESCROW_TOKEN" "balanceOf(address)(uint256)" "$DEPLOYER"
+  cast call --rpc-url "$RPC" "$ESCROW_TOKEN" "allowance(address,address)(uint256)" "$DEPLOYER" "$ESCROW_ADDR"
+else
+  echo "NOTE: ESCROW_TOKEN ($ESCROW_TOKEN) has no code on this chain. Skipping ERC20 calls."
+fi
+
+echo "✅ Sanity checks passed."

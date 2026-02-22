@@ -1,0 +1,33 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+.deployments/.env
+
+# Node
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Next.js
+.next/
+out/
+
+# Foundry
+out/
+cache/
+broadcast/
+artifacts/
+
+# Logs
+*.log
+
+# Editor
+.vscode/
+.idea/
