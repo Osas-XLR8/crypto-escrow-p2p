@@ -17,6 +17,76 @@ export const USDT_ADDRESS: `0x${string}` = isAddress(envUsdt)
   ? envUsdt
   : "0x5FbDB2315678afecb367f032d93F642f64180aa3";
 
+/** Block to start scanning events from. 0 is fine on Anvil; set it to the deploy block on real networks. */
+export const ESCROW_DEPLOY_BLOCK = BigInt(process.env.NEXT_PUBLIC_ESCROW_DEPLOY_BLOCK ?? "0");
+
+/** Trade lifecycle events — used by the trade list / activity timeline. */
+export const ESCROW_EVENTS = [
+  {
+    type: "event",
+    name: "TradeCreated",
+    inputs: [
+      { name: "tradeId", type: "bytes32", indexed: true },
+      { name: "seller", type: "address", indexed: true },
+      { name: "buyer", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+      { name: "lockDeadline", type: "uint64", indexed: false },
+      { name: "fiatDeadline", type: "uint64", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "CryptoDeposited",
+    inputs: [
+      { name: "tradeId", type: "bytes32", indexed: true },
+      { name: "seller", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "Released",
+    inputs: [
+      { name: "tradeId", type: "bytes32", indexed: true },
+      { name: "buyer", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "Refunded",
+    inputs: [
+      { name: "tradeId", type: "bytes32", indexed: true },
+      { name: "seller", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "DisputeOpened",
+    inputs: [
+      { name: "tradeId", type: "bytes32", indexed: true },
+      { name: "openedBy", type: "address", indexed: true },
+    ],
+  },
+  {
+    type: "event",
+    name: "DisputeResolved",
+    inputs: [
+      { name: "tradeId", type: "bytes32", indexed: true },
+      { name: "releasedToBuyer", type: "bool", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "DisputeTimedOut",
+    inputs: [
+      { name: "tradeId", type: "bytes32", indexed: true },
+      { name: "claimedBy", type: "address", indexed: true },
+    ],
+  },
+] as const;
+
 export const ESCROW_ABI = [
   // =========================
   // READS

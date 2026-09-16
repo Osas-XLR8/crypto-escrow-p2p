@@ -205,13 +205,15 @@ Important UI rule:
 - `demo-all.sh` (deploy + smoke + negative suite) passes with separate owner/signer/operator keys
 - Frontend builds; `/api/escrow/sign-resolve` requires operator wallet auth
 - CI (repo root `.github/workflows/ci.yml`): forge fmt/build/test + frontend typecheck/build
+- Live trade list + per-trade activity timeline rebuilt from contract events
+  (`src/lib/tradeIndex.ts`, `src/hooks/useTradeIndex.ts`); set `NEXT_PUBLIC_ESCROW_DEPLOY_BLOCK` on real networks
 
 ---
 
 ## 11) Next steps (what we should build next)
 
 ### Product
-- Trade discovery: index events so users don't have to paste tradeIds
+- Scale trade indexing beyond a single getLogs call (chunked ranges or a backend indexer) for real networks
 - Clearer UX: tx explorer links, per-role guided flows
 
 ### Backend for marketplace demo

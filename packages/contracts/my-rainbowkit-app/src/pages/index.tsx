@@ -9,10 +9,14 @@ import {
   useWriteContract,
   useWaitForTransactionReceipt,
 } from "wagmi";
-import { formatUnits } from "viem";
 import { ESCROW_ABI, ESCROW_ADDRESS, USDT_ADDRESS } from "@/config/escrow";
 import { resolveAuthMessage } from "@/lib/resolveAuth";
+import { fmtDuration, fmtTs, fmtUSDT, sameAddr, shortAddr } from "@/lib/format";
+import { useTradeIndex } from "@/hooks/useTradeIndex";
 import CreateTrade from "@/components/CreateTrade";
+import TradeList from "@/components/TradeList";
+import TradeTimeline from "@/components/TradeTimeline";
+import { STATE_META, StateBadge } from "@/components/StateBadge";
 
 // ─── USDT Approve ABI ────────────────────────────────────────────────────────
 
@@ -36,46 +40,12 @@ enum State {
   RELEASED = 3, REFUNDED = 4, DISPUTE = 5,
 }
 
-const STATE_META: Record<number, { label: string; color: string; bg: string; dot: string }> = {
-  0: { label: "NONE",     color: "#64748b", bg: "#1e293b", dot: "#64748b" },
-  1: { label: "CREATED",  color: "#60a5fa", bg: "#1e3a5f", dot: "#3b82f6" },
-  2: { label: "LOCKED",   color: "#fbbf24", bg: "#3d2e00", dot: "#f59e0b" },
-  3: { label: "RELEASED", color: "#34d399", bg: "#052e16", dot: "#10b981" },
-  4: { label: "REFUNDED", color: "#a78bfa", bg: "#2e1065", dot: "#8b5cf6" },
-  5: { label: "DISPUTE",  color: "#f87171", bg: "#3f0f0f", dot: "#ef4444" },
-};
-
 type TradeData = readonly [string, string, bigint, bigint, bigint, number];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function isBytes32Hex(s: string) { return /^0x[0-9a-fA-F]{64}$/.test(s.trim()); }
 function isHex(s: string)        { return /^0x[0-9a-fA-F]+$/.test(s.trim()); }
-
-function fmtUSDT(raw: bigint) {
-  return parseFloat(formatUnits(raw, 6)).toLocaleString("en-US", {
-    minimumFractionDigits: 2, maximumFractionDigits: 6,
-  });
-}
-function fmtTs(ts: bigint) {
-  if (!ts || ts === 0n) return "—";
-  return new Date(Number(ts) * 1000).toLocaleString("en-GB", {
-    day: "2-digit", month: "short", year: "numeric",
-    hour: "2-digit", minute: "2-digit",
-  });
-}
-function fmtDuration(secs: number) {
-  if (secs <= 0) return "now";
-  const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
-  return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${Math.max(m, 1)}m`;
-}
-function sameAddr(a?: string, b?: string) {
-  return !!a && !!b && a.toLowerCase() === b.toLowerCase();
-}
-function shortAddr(addr: string) {
-  if (!addr || addr === "0x0000000000000000000000000000000000000000") return "—";
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
-}
 
 // ─── Shared style tokens ──────────────────────────────────────────────────────
 
@@ -89,24 +59,6 @@ const lbl: React.CSSProperties = {
   display: "block", fontSize: 11, fontWeight: 600,
   color: "#64748b", letterSpacing: "0.06em", marginBottom: 6,
 };
-
-// ─── StateBadge ───────────────────────────────────────────────────────────────
-
-function StateBadge({ state }: { state: number }) {
-  const m = STATE_META[state] ?? STATE_META[0];
-  return (
-    <span style={{
-      display: "inline-flex", alignItems: "center", gap: 6,
-      padding: "4px 12px", borderRadius: 20,
-      background: m.bg, color: m.color,
-      fontSize: 11, fontWeight: 700, letterSpacing: "0.1em",
-      border: `1px solid ${m.color}40`,
-    }}>
-      <span style={{ width: 6, height: 6, borderRadius: "50%", background: m.dot, boxShadow: `0 0 6px ${m.dot}`, display: "inline-block" }} />
-      {m.label}
-    </span>
-  );
-}
 
 // ─── TxStatus ────────────────────────────────────────────────────────────────
 
@@ -145,8 +97,13 @@ function ActionBtn({ label, sublabel, enabled, reason, onClick, variant = "ghost
 }) {
   const palette = { primary: "#10b981", danger: "#ef4444", warning: "#f59e0b", ghost: "#475569" } as const;
   const c = palette[variant];
+  const [hover, setHover] = useState(false);
   return (
-    <div style={{ position: "relative", display: "inline-block" }}>
+    <div
+      style={{ position: "relative", display: "inline-block" }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
       <button
         disabled={!enabled} onClick={onClick} title={reason}
         style={{
@@ -163,7 +120,7 @@ function ActionBtn({ label, sublabel, enabled, reason, onClick, variant = "ghost
         {label}
         {sublabel && <span style={{ fontSize: 10, fontWeight: 400, opacity: 0.65 }}>{sublabel}</span>}
       </button>
-      {!enabled && reason && (
+      {!enabled && reason && hover && (
         <div style={{
           position: "absolute", bottom: "calc(100% + 8px)", left: "50%", transform: "translateX(-50%)",
           background: "#1e293b", color: "#94a3b8", fontSize: 11, padding: "6px 12px",
@@ -253,12 +210,10 @@ export default function Home() {
     query: { enabled: isConnected && tradeIdOk },
   });
 
-  // Ticking clock so deadline-based buttons enable themselves without a refresh.
-  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
-  useEffect(() => {
-    const id = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 5000);
-    return () => clearInterval(id);
-  }, []);
+  // Live trade list from on-chain events. Its clock follows chain time, so
+  // deadline-based buttons stay correct even after Anvil time warps.
+  const tradeIndex = useTradeIndex();
+  const now = tradeIndex.chainNow;
 
   const t          = read.data as TradeData | undefined;
   const stateNum   = (t?.[5] ?? 0) as number;
@@ -291,8 +246,19 @@ export default function Home() {
                escrowWrite.isPending  || escrowReceipt.isLoading  || sigBusy;
 
   const refetch = useCallback(() => {
-    setTimeout(() => { read.refetch(); openedRead.refetch(); }, 1200);
-  }, [read, openedRead]);
+    setTimeout(() => { read.refetch(); openedRead.refetch(); tradeIndex.refetch(); }, 1200);
+  }, [read, openedRead, tradeIndex]);
+
+  const selectedSummary = tradeIndex.trades.find(x => sameAddr(x.tradeId, tradeId.trim()));
+
+  function selectTrade(id: `0x${string}`) {
+    setTradeId(id);
+    setPanel(null);
+    setSigError(null);
+    requestAnimationFrame(() =>
+      document.getElementById("trade-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })
+    );
+  }
 
   // ── Auto-deposit: step 2 fires after approve confirms ───────────────────────
 
@@ -479,6 +445,18 @@ export default function Home() {
             )}
           </div>
 
+          {/* Trade List */}
+          {isConnected && (
+            <TradeList
+              trades={tradeIndex.trades}
+              viewer={{ address, operator: operatorRead.data as string | undefined, chainNow: now, disputeTimeout }}
+              isLoading={tradeIndex.isLoading}
+              error={tradeIndex.error}
+              selectedId={tradeIdOk ? tradeId.trim() : undefined}
+              onSelect={selectTrade}
+            />
+          )}
+
           {/* Trade Lookup */}
           <div style={{ background: "#0a1628", border: "1px solid #1e293b", borderRadius: 12, padding: 20 }}>
             <div style={{ fontSize: 11, color: "#334155", letterSpacing: "0.12em", marginBottom: 12 }}>TRADE LOOKUP</div>
@@ -506,7 +484,7 @@ export default function Home() {
 
           {/* Trade Panel */}
           {isConnected && tradeIdOk && (
-            <div style={{ background: "#0a1628", border: "1px solid #1e293b", borderRadius: 12, padding: 20 }}>
+            <div id="trade-panel" style={{ background: "#0a1628", border: "1px solid #1e293b", borderRadius: 12, padding: 20, scrollMarginTop: 76 }}>
 
               {read.isLoading && <div style={{ color: "#334155", textAlign: "center", padding: "32px 0", fontSize: 13 }}>Loading trade data…</div>}
               {read.error    && <div style={{ padding: 16, borderRadius: 10, background: "#1a0808", border: "1px solid #3f0f0f", color: "#f87171", fontSize: 13 }}>⚠ Could not load trade. Make sure Anvil is running and this tradeId was created on-chain.</div>}
@@ -531,12 +509,12 @@ export default function Home() {
                     <Field label="LOCK DEADLINE" value={<span style={{ color: "#94a3b8" }}>{fmtTs(t[3])}</span>} />
                     <Field label="FIAT DEADLINE" value={<span style={{ color: "#94a3b8" }}>{fmtTs(t[4])}</span>} />
                     {disputeOpenedAt > 0 && (
-                      <Field label="DISPUTE OPENED" value={<span style={{ color: "#f87171" }}>{fmtTs(BigInt(disputeOpenedAt))}</span>} />
+                      <Field label="DISPUTE OPENED" value={<span style={{ color: "#f87171" }}>{fmtTs(disputeOpenedAt)}</span>} />
                     )}
                     {isDispute && timeoutAt > 0 && (
                       <Field label="AUTO-REFUND UNLOCKS" value={
                         <span style={{ color: timeoutClaimable ? "#34d399" : "#94a3b8" }}>
-                          {fmtTs(BigInt(timeoutAt))} · {timeoutClaimable ? "claimable now" : `in ${fmtDuration(timeoutAt - now)}`}
+                          {fmtTs(timeoutAt)} · {timeoutClaimable ? "claimable now" : `in ${fmtDuration(timeoutAt - now)}`}
                         </span>
                       } />
                     )}
@@ -639,6 +617,10 @@ export default function Home() {
                       <StateBadge state={stateNum} />
                       <span>No further actions available.</span>
                     </div>
+                  )}
+
+                  {selectedSummary && (
+                    <TradeTimeline trade={selectedSummary} operator={operatorRead.data as string | undefined} chainNow={now} />
                   )}
 
                   {/* Tx status */}
