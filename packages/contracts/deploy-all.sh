@@ -1,4 +1,3 @@
-
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -38,7 +37,7 @@ need date
 
 echo "==> RPC: $RPC"
 echo "==> Building..."
-forge build >/dev/null
+forge build 2>/dev/null
 
 DEPLOYER="$(cast wallet address --private-key "$PRIVATE_KEY")"
 SIGNER="${BACKEND_SIGNER:-$DEPLOYER}"
@@ -127,47 +126,57 @@ echo "TEST_TOKEN():  $ESCROW_TEST_TOKEN"
 echo "ESCROW_TOKEN:  $ESCROW_TOKEN"
 
 # ==============================
-# Smoke test
+# Smoke test (v2 EIP-712)
 # ==============================
 if [[ "${1:-}" == "--smoke" ]]; then
   echo
-  echo "==> Running SMOKE TEST"
+  echo "==> Running SMOKE TEST (v2 EIP-712)"
 
   BUYER=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
   AMT=100000000
 
   NOW=$(date +%s)
   LOCK=$((NOW + 600))
-  EXP=$((NOW + 86400))
+  FIAT=$((NOW + 86400))
   TRADE_ID=$(cast keccak "trade-$NOW")
 
   echo "Trade: $TRADE_ID"
 
+  # Create trade
   cast send --rpc-url "$RPC" --private-key "$PRIVATE_KEY" \
     "$ESCROW_ADDR" \
     "createTrade(bytes32,address,address,uint256,uint64,uint64)" \
-    "$TRADE_ID" "$DEPLOYER" "$BUYER" "$AMT" "$LOCK" "$EXP" >/dev/null
+    "$TRADE_ID" "$DEPLOYER" "$BUYER" "$AMT" "$LOCK" "$FIAT" >/dev/null
 
+  # Deposit
   cast send --rpc-url "$RPC" --private-key "$PRIVATE_KEY" \
     "$ESCROW_ADDR" "deposit(bytes32)" "$TRADE_ID" >/dev/null
 
   AUTH_EXP=$((NOW + 3600))
-  SALT=$(cast keccak "salt-$NOW")
+  NONCE=$(cast keccak "nonce-$NOW")
 
+  # Get the EIP-712 digest from the contract (already contains \x19\x01 prefix)
   DIGEST=$(cast call --rpc-url "$RPC" "$ESCROW_ADDR" \
     "releaseDigest(bytes32,uint64,bytes32)(bytes32)" \
-    "$TRADE_ID" "$AUTH_EXP" "$SALT")
+    "$TRADE_ID" "$AUTH_EXP" "$NONCE")
 
-  SIG=$(cast wallet sign --private-key "$PRIVATE_KEY" "$DIGEST")
+  # Sign the raw digest WITHOUT any extra hashing prefix.
+  # v2 contract uses EIP-712 (\x19\x01 already baked into digest).
+  # --no-hash tells cast to sign the bytes as-is.
+  SIG=$(cast wallet sign --no-hash --private-key "$PRIVATE_KEY" "$DIGEST")
 
+  # Release
   cast send --rpc-url "$RPC" --private-key "$PRIVATE_KEY" \
     "$ESCROW_ADDR" \
     "release(bytes32,uint64,bytes32,bytes)" \
-    "$TRADE_ID" "$AUTH_EXP" "$SALT" "$SIG" >/dev/null
+    "$TRADE_ID" "$AUTH_EXP" "$NONCE" "$SIG" >/dev/null
+
+  # Save TRADE_ID for reference
+  sed -i "s/^TRADE_ID=.*//" "$ENV_FILE" 2>/dev/null || true
+  echo "TRADE_ID=$TRADE_ID" >> "$ENV_FILE"
 
   echo "==> Smoke test PASSED"
 fi
 
 echo
 echo "✅ Done."
-

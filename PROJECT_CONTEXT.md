@@ -47,7 +47,7 @@ Contracts (Foundry):
   - `.deployments/.env` (generated after deploy)
 
 Frontend (Next.js):
-- `packages/frontend/` (or equivalent Next.js folder)
+- `packages/contracts/my-rainbowkit-app/`
   - `src/pages/index.tsx`
   - `src/components/CreateTrade.tsx`
   - `src/config/escrow.ts`
