@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# load deployment outputs
-source ./.deployments/.env
+# EIP-712 digests already include the  prefix, so sign with --no-hash.
 
-SELLER_PK="${PRIVATE_KEY:?set PRIVATE_KEY in env}"
+# load deployment outputs
+source "${OUT_DIR:-./.deployments}/.env"
+
+SELLER_PK="${PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
+SIGNER_PK="${BACKEND_SIGNER_PK:-$SELLER_PK}"
 BUYER=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
 BUYER_PK=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
 
@@ -56,7 +59,7 @@ DIGEST=$(cast call --rpc-url "$RPC" "$ESCROW_ADDR" \
   "releaseDigest(bytes32,uint64,bytes32)(bytes32)" \
   "$TRADE_ID" "$AUTH_EXP" "$SALT")
 
-BAD_SIG=$(cast wallet sign --private-key "$BUYER_PK" "$DIGEST")
+BAD_SIG=$(cast wallet sign --no-hash --private-key "$BUYER_PK" "$DIGEST")
 
 set +e
 cast send --rpc-url "$RPC" --private-key "$SELLER_PK" \
@@ -80,7 +83,7 @@ DIGEST2=$(cast call --rpc-url "$RPC" "$ESCROW_ADDR" \
   "releaseDigest(bytes32,uint64,bytes32)(bytes32)" \
   "$TRADE_ID" "$AUTH_EXP_PAST" "$SALT2")
 
-SIG_EXPIRED=$(cast wallet sign --private-key "$SELLER_PK" "$DIGEST2")
+SIG_EXPIRED=$(cast wallet sign --no-hash --private-key "$SIGNER_PK" "$DIGEST2")
 
 set +e
 cast send --rpc-url "$RPC" --private-key "$SELLER_PK" \
@@ -104,7 +107,7 @@ DIGEST3=$(cast call --rpc-url "$RPC" "$ESCROW_ADDR" \
   "releaseDigest(bytes32,uint64,bytes32)(bytes32)" \
   "$TRADE_ID" "$AUTH_EXP_OK" "$SALT3")
 
-SIG_OK=$(cast wallet sign --private-key "$SELLER_PK" "$DIGEST3")
+SIG_OK=$(cast wallet sign --no-hash --private-key "$SIGNER_PK" "$DIGEST3")
 
 echo "   5a) first release should succeed"
 cast send --rpc-url "$RPC" --private-key "$SELLER_PK" \

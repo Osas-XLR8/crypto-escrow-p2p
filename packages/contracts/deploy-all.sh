@@ -14,7 +14,8 @@ DECIMALS="${DECIMALS:-6}"
 MINT_AMOUNT="${MINT_AMOUNT:-1000000000}"
 APPROVE_AMOUNT="${APPROVE_AMOUNT:-1000000000}"
 
-BACKEND_SIGNER="${BACKEND_SIGNER:-}"
+# Signer key used by --smoke to sign authorizations (defaults to the deployer key)
+BACKEND_SIGNER_PK="${BACKEND_SIGNER_PK:-$PRIVATE_KEY}"
 
 OUT_DIR="${OUT_DIR:-./.deployments}"
 mkdir -p "$OUT_DIR"
@@ -40,10 +41,14 @@ echo "==> Building..."
 forge build 2>/dev/null
 
 DEPLOYER="$(cast wallet address --private-key "$PRIVATE_KEY")"
-SIGNER="${BACKEND_SIGNER:-$DEPLOYER}"
+SIGNER="${BACKEND_SIGNER:-$(cast wallet address --private-key "$BACKEND_SIGNER_PK")}"
+OWNER="${OWNER:-$DEPLOYER}"
+OPERATOR="${OPERATOR:-$DEPLOYER}"
 
 echo "==> Deployer:       $DEPLOYER"
+echo "==> Owner:          $OWNER"
 echo "==> Backend signer: $SIGNER"
+echo "==> Operator:       $OPERATOR"
 
 # ==============================
 # Deploy MockUSDT
@@ -71,7 +76,7 @@ ESCROW_OUT="$(forge create \
   --broadcast \
   --private-key "$PRIVATE_KEY" \
   src/P2PEscrowTestable.sol:P2PEscrowTestable \
-  --constructor-args "$SIGNER" "$USDT_ADDR")"
+  --constructor-args "$OWNER" "$SIGNER" "$OPERATOR" "$USDT_ADDR")"
 
 ESCROW_ADDR="$(echo "$ESCROW_OUT" | awk '/Deployed to:/ {print $3; exit}')"
 [[ -z "$ESCROW_ADDR" ]] && { echo "ERROR: could not parse Escrow address"; exit 1; }
@@ -111,10 +116,33 @@ USDT_ADDR=$USDT_ADDR
 ESCROW_ADDR=$ESCROW_ADDR
 ESCROW_TOKEN=$ESCROW_TOKEN
 DEPLOYER=$DEPLOYER
+OWNER=$OWNER
 BACKEND_SIGNER=$SIGNER
+OPERATOR=$OPERATOR
 ENV
 
 echo "Saved: $ENV_FILE"
+
+# ==============================
+# Sync frontend env (single source of truth for addresses)
+# ==============================
+FRONTEND_ENV="${FRONTEND_ENV:-./my-rainbowkit-app/.env.local}"
+
+upsert_env() { # file key value
+  if grep -q "^$2=" "$1"; then
+    sed -i "s|^$2=.*|$2=$3|" "$1"
+  else
+    printf '
+%s=%s
+' "$2" "$3" >> "$1"
+  fi
+}
+
+if [[ "${SYNC_FRONTEND_ENV:-1}" == "1" && -f "$FRONTEND_ENV" ]]; then
+  upsert_env "$FRONTEND_ENV" NEXT_PUBLIC_ESCROW_ADDRESS "$ESCROW_ADDR"
+  upsert_env "$FRONTEND_ENV" NEXT_PUBLIC_USDT_ADDRESS "$USDT_ADDR"
+  echo "Synced addresses into: $FRONTEND_ENV (restart next dev to pick them up)"
+fi
 
 # ==============================
 # Quick sanity
@@ -126,11 +154,11 @@ echo "TEST_TOKEN():  $ESCROW_TEST_TOKEN"
 echo "ESCROW_TOKEN:  $ESCROW_TOKEN"
 
 # ==============================
-# Smoke test (v2 EIP-712)
+# Smoke test (v3 EIP-712)
 # ==============================
 if [[ "${1:-}" == "--smoke" ]]; then
   echo
-  echo "==> Running SMOKE TEST (v2 EIP-712)"
+  echo "==> Running SMOKE TEST (v3 EIP-712)"
 
   BUYER=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
   AMT=100000000
@@ -163,7 +191,7 @@ if [[ "${1:-}" == "--smoke" ]]; then
   # Sign the raw digest WITHOUT any extra hashing prefix.
   # v2 contract uses EIP-712 (\x19\x01 already baked into digest).
   # --no-hash tells cast to sign the bytes as-is.
-  SIG=$(cast wallet sign --no-hash --private-key "$PRIVATE_KEY" "$DIGEST")
+  SIG=$(cast wallet sign --no-hash --private-key "$BACKEND_SIGNER_PK" "$DIGEST")
 
   # Release
   cast send --rpc-url "$RPC" --private-key "$PRIVATE_KEY" \

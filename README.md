@@ -3,9 +3,10 @@
 A minimal, investor-safe P2P escrow demo:
 - Seller deposits USDT (or a mock token in local demo)
 - Buyer pays fiat off-chain
-- Backend authorizes release using a signature
+- Backend authorizes release using an EIP-712 signature
 - Refunds after deadline (unless dispute)
-- Disputes freeze funds until backend resolves
+- Disputes freeze funds until resolved — or auto-refund the seller after 7 days
+- Separate owner / signer / operator keys, with rotation and an entry-only pause
 
 > ⚠️ Demo MVP. Not audited. Do not use in production with real funds.
 
@@ -23,10 +24,7 @@ anvil
 Deploy + smoke test
 
 cd packages/contracts
-./deploy-all.sh --smoke
-source ./.deployments/.env
-export PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
-./smoke-negative.sh
+./demo-all.sh   # deploy + smoke + negative suite; also syncs addresses into the frontend .env.local
 
 Frontend
 
@@ -40,26 +38,31 @@ http://localhost:3001
 
 Architecture (High level)
 
-Backend creates trade + signs authorizations.
+Operator wallet creates trades and submits dispute resolutions; a separate backend signer key signs authorizations; the owner key administers roles and pause.
 Smart contract holds funds + enforces state machine.
 Frontend reads state and triggers deposit/refund/dispute.
 
 State Machine
 
 NONE → CREATED → LOCKED → (RELEASED | REFUNDED | DISPUTE)
-DISPUTE → (RELEASED | REFUNDED) by backend resolution
+DISPUTE → (RELEASED | REFUNDED) by operator + signer resolution
+DISPUTE → REFUNDED by anyone after DISPUTE_TIMEOUT (7 days)
 
 Security Notes
 
 Replay protection: usedDigest + usedNonces
 
-Dispute mode freezes release/refund until resolved
+Dispute mode freezes release/refund until resolved or timed out
 
-Backend signer is explicit and auditable
+Buyer can only dispute before the fiat deadline (cannot block a due refund)
+
+Role separation: owner / backendSigner / operator, rotatable
+
+Pause blocks new money in, never money out
+
+EIP-712 typed signatures with per-action typehashes
 
 Roadmap
-
-EIP-712 typed signatures
 
 Multi-token support / per-trade token
 
@@ -67,7 +70,7 @@ Partial fills / escrow fees
 
 Backend service + DB + admin dashboard
 
-Formal audit + fuzz testing
+Formal audit + invariant testing (fuzz tests already included)
 
 License
 

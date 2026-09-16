@@ -12,7 +12,7 @@ echo "==> 1/3 Deploy + Smoke"
 echo
 
 # load deployment outputs for following scripts
-source ./.deployments/.env
+source "${OUT_DIR:-./.deployments}/.env"
 
 # 2) Negative suite
 echo "==> 2/3 Negative Suite"

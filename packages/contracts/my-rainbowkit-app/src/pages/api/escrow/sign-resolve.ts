@@ -1,9 +1,12 @@
 // src/pages/api/escrow/sign-resolve.ts
 // EIP-712 backend signature generator for dispute resolution (Release / Refund)
 //
-// AUTH: the caller must sign resolveAuthMessage(...) with the wallet that is the
-// escrow's on-chain backendSigner. Without this, anyone could obtain resolution
-// signatures for any disputed trade.
+// AUTH: the caller must sign resolveAuthMessage(...) with the escrow's on-chain
+// operator wallet — the only account allowed to submit resolveDispute* txs.
+// Without this, anyone could obtain resolution signatures for any disputed trade.
+//
+// Keys (P2PEscrow v3): the operator wallet (browser) submits the tx; this server
+// holds the separate backendSigner key that produces the EIP-712 authorization.
 
 import type { NextApiRequest, NextApiResponse } from "next";
 import { ethers } from "ethers";
@@ -14,6 +17,13 @@ const ESCROW_ABI = [
   {
     type: "function",
     name: "backendSigner",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "address" }],
+  },
+  {
+    type: "function",
+    name: "operator",
     stateMutability: "view",
     inputs: [],
     outputs: [{ name: "", type: "address" }],
@@ -34,8 +44,8 @@ const ESCROW_ABI = [
   },
 ] as const;
 
-// Must match contract exactly
-const RELEASE_TYPE = [
+// Must match contract exactly (ResolveRelease / Refund typehashes)
+const RESOLVE_RELEASE_TYPE = [
   { name: "tradeId", type: "bytes32" },
   { name: "buyer", type: "address" },
   { name: "amount", type: "uint256" },
@@ -104,9 +114,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(401).json({ error: "Invalid admin auth signature" });
     }
 
-    const onchainSigner: string = await contract.backendSigner();
-    if (caller.toLowerCase() !== onchainSigner.toLowerCase()) {
-      return res.status(403).json({ error: "Only the escrow backend signer may request resolutions" });
+    const [onchainOperator, onchainSigner]: [string, string] = await Promise.all([
+      contract.operator(),
+      contract.backendSigner(),
+    ]);
+    if (caller.toLowerCase() !== onchainOperator.toLowerCase()) {
+      return res.status(403).json({ error: "Only the escrow operator may request resolutions" });
     }
 
     // Defence in depth: the server key must be the key the contract trusts.
@@ -132,7 +145,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const domain = {
       name: "P2PEscrow",
-      version: "2",
+      version: "3",
       chainId,
       verifyingContract: contractAddress,
     };
@@ -144,7 +157,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const refundValue = { tradeId, seller, amount, expiresAt, nonce };
 
     const digest = buyerWins
-      ? ethers.TypedDataEncoder.hash(domain, { Release: RELEASE_TYPE }, releaseValue)
+      ? ethers.TypedDataEncoder.hash(domain, { ResolveRelease: RESOLVE_RELEASE_TYPE }, releaseValue)
       : ethers.TypedDataEncoder.hash(domain, { Refund: REFUND_TYPE }, refundValue);
 
     // Sign raw digest (NO EIP-191 wrapping)

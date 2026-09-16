@@ -13,7 +13,9 @@ import {P2PEscrow} from "./P2PEscrow.sol";
 contract P2PEscrowTestable is P2PEscrow {
     address public immutable TEST_TOKEN;
 
-    constructor(address _backendSigner, address _testToken) P2PEscrow(_backendSigner) {
+    constructor(address _owner, address _backendSigner, address _operator, address _testToken)
+        P2PEscrow(_owner, _backendSigner, _operator)
+    {
         require(_testToken != address(0), "test token required");
         TEST_TOKEN = _testToken;
     }

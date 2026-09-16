@@ -2,40 +2,39 @@
 pragma solidity ^0.8.20;
 
 /*
-    P2PEscrow v2 — Production Hardened
+    P2PEscrow v3 — Roles, Pause, Dispute Timeout
 
-    SECURITY CHANGES FROM v1:
+    CHANGES FROM v2:
     ─────────────────────────────────────────────────────────────────────────────
-    [1] ReentrancyGuard added — all state-changing external functions are
-        nonReentrant. CEI (Checks-Effects-Interactions) already followed but
-        guard provides belt-and-suspenders safety for exotic ERC20 tokens.
+    [1] Role separation. One key no longer does everything:
+          owner         — admin (cold key / multisig). Rotates keys, pauses.
+          backendSigner — signs EIP-712 authorizations only.
+          operator      — hot key that sends createTrade / dispute txs.
+        Dispute resolution needs BOTH the operator (msg.sender) AND a
+        backendSigner signature, so a single leaked key cannot move funds.
 
-    [2] EIP-712 typed structured data replaces raw abi.encodePacked.
-        Signatures are now wallet-displayable and formally domain-separated.
-        Domain: name="P2PEscrow", version="2", chainId, verifyingContract.
+    [2] Key rotation. backendSigner and operator are owner-settable.
+        Ownership transfer is two-step (transferOwnership + acceptOwnership).
 
-    [3] Release/Refund digest domains fully separated at the type-hash level.
-        resolveDisputeRelease and release() now use DIFFERENT type hashes
-        so a sig for one CANNOT be replayed in the other even if state
-        transitions were somehow bypassed.
+    [3] Pause. Blocks NEW money entering (createTrade, deposit) only.
+        Every exit path (release, refund, resolutions, timeout claim) stays
+        open so pausing can never trap user funds.
 
-    [4] openDispute restricted to buyer OR backendSigner only.
-        Removed seller from dispute openers — seller opening their own
-        dispute to block a legitimate refund window is a griefing vector.
+    [4] Dispute timeout. A dispute unresolved for DISPUTE_TIMEOUT can be
+        closed by anyone, refunding the seller. Funds can no longer be frozen
+        forever if the backend disappears.
 
-    [5] safeTransfer helper — handles non-standard ERC20s that return nothing
-        (e.g. real USDT on some chains). Uses low-level call + return check.
+    [5] Buyer dispute window. The buyer may only open a dispute up to
+        fiatDeadline, so they cannot block the seller's refund after the
+        deadline has passed. The operator may still dispute any LOCKED trade.
 
-    [6] Buyer/seller zero-address checks strengthened.
+    [6] Dispute release uses its own ResolveRelease typehash, so a signature
+        for release() can never be used for resolveDisputeRelease() or
+        vice versa. EIP-712 domain version bumped to "3".
 
-    [7] lockDeadline must be in the future at createTrade time.
-
-    [8] amount capped at reasonable max (10M USDT) to prevent accidental
-        fat-finger trades that drain a wallet. Adjustable by subclass.
-
-    [9] Events emit indexed buyer/seller for easier off-chain indexing.
-
-    [10] DOMAIN_SEPARATOR is cached at deploy time (gas saving + immutability).
+    Retained from v2: ReentrancyGuard, CEI ordering, EIP-712 digests, digest +
+    nonce replay protection, signature malleability guard, safe ERC20 transfer
+    helpers (non-returning tokens such as USDT), amount cap.
     ─────────────────────────────────────────────────────────────────────────────
 */
 
@@ -53,15 +52,22 @@ contract P2PEscrow {
     /// Max trade size: 10,000,000 USDT (6 decimals)
     uint256 public constant MAX_AMOUNT = 10_000_000 * 1e6;
 
+    /// How long a dispute may stay unresolved before anyone can refund the seller.
+    uint64 public constant DISPUTE_TIMEOUT = 7 days;
+
     // ─── EIP-712 ──────────────────────────────────────────────────────────────
 
     bytes32 public immutable DOMAIN_SEPARATOR;
 
-    /// Release typehash — used by release() AND resolveDisputeRelease()
+    /// Used ONLY by release()
     bytes32 public constant RELEASE_TYPEHASH =
         keccak256("Release(bytes32 tradeId,address buyer,uint256 amount,uint64 expiresAt,bytes32 nonce)");
 
-    /// Refund typehash — used ONLY by resolveDisputeRefund()
+    /// Used ONLY by resolveDisputeRelease()
+    bytes32 public constant RESOLVE_RELEASE_TYPEHASH =
+        keccak256("ResolveRelease(bytes32 tradeId,address buyer,uint256 amount,uint64 expiresAt,bytes32 nonce)");
+
+    /// Used ONLY by resolveDisputeRefund()
     bytes32 public constant REFUND_TYPEHASH =
         keccak256("Refund(bytes32 tradeId,address seller,uint256 amount,uint64 expiresAt,bytes32 nonce)");
 
@@ -98,10 +104,30 @@ contract P2PEscrow {
         State state;
     }
 
-    // ─── Storage ──────────────────────────────────────────────────────────────
+    // ─── Roles ────────────────────────────────────────────────────────────────
 
-    /// backend signer (platform key)
-    address public immutable backendSigner;
+    address public owner;
+    address public pendingOwner;
+    address public backendSigner;
+    address public operator;
+    bool public paused;
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "only owner");
+        _;
+    }
+
+    modifier onlyOperator() {
+        require(msg.sender == operator, "only operator");
+        _;
+    }
+
+    modifier whenNotPaused() {
+        require(!paused, "paused");
+        _;
+    }
+
+    // ─── Storage ──────────────────────────────────────────────────────────────
 
     /// tradeId => Trade
     mapping(bytes32 => Trade) public trades;
@@ -111,6 +137,9 @@ contract P2PEscrow {
 
     /// digest => used? (strong replay protection)
     mapping(bytes32 => bool) public usedDigest;
+
+    /// tradeId => timestamp the dispute was opened (0 if never disputed)
+    mapping(bytes32 => uint64) public disputeOpenedAt;
 
     // ─── Events ───────────────────────────────────────────────────────────────
 
@@ -128,20 +157,37 @@ contract P2PEscrow {
     event Refunded(bytes32 indexed tradeId, address indexed seller, uint256 amount);
     event DisputeOpened(bytes32 indexed tradeId, address indexed openedBy);
     event DisputeResolved(bytes32 indexed tradeId, bool releasedToBuyer);
+    event DisputeTimedOut(bytes32 indexed tradeId, address indexed claimedBy);
+
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event BackendSignerUpdated(address indexed previousSigner, address indexed newSigner);
+    event OperatorUpdated(address indexed previousOperator, address indexed newOperator);
+    event Paused(address indexed by);
+    event Unpaused(address indexed by);
 
     // ─── Constructor ──────────────────────────────────────────────────────────
 
-    constructor(address _backendSigner) {
+    constructor(address _owner, address _backendSigner, address _operator) {
+        require(_owner != address(0), "owner required");
         require(_backendSigner != address(0), "backend signer required");
+        require(_operator != address(0), "operator required");
+
+        owner = _owner;
         backendSigner = _backendSigner;
+        operator = _operator;
         _reentrancyStatus = _NOT_ENTERED;
+
+        emit OwnershipTransferred(address(0), _owner);
+        emit BackendSignerUpdated(address(0), _backendSigner);
+        emit OperatorUpdated(address(0), _operator);
 
         // Cache EIP-712 domain separator at deploy time.
         DOMAIN_SEPARATOR = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
                 keccak256("P2PEscrow"),
-                keccak256("2"),
+                keccak256("3"),
                 block.chainid,
                 address(this)
             )
@@ -160,6 +206,45 @@ contract P2PEscrow {
         return MAX_AMOUNT;
     }
 
+    // ─── Admin ────────────────────────────────────────────────────────────────
+
+    /// @notice Starts a two-step ownership transfer. Pass address(0) to cancel.
+    function transferOwnership(address newOwner) external onlyOwner {
+        pendingOwner = newOwner;
+        emit OwnershipTransferStarted(owner, newOwner);
+    }
+
+    function acceptOwnership() external {
+        require(msg.sender == pendingOwner, "not pending owner");
+        emit OwnershipTransferred(owner, msg.sender);
+        owner = msg.sender;
+        pendingOwner = address(0);
+    }
+
+    /// @notice Rotates the signing key. Outstanding signatures from the old key become invalid.
+    function setBackendSigner(address newSigner) external onlyOwner {
+        require(newSigner != address(0), "zero address");
+        emit BackendSignerUpdated(backendSigner, newSigner);
+        backendSigner = newSigner;
+    }
+
+    function setOperator(address newOperator) external onlyOwner {
+        require(newOperator != address(0), "zero address");
+        emit OperatorUpdated(operator, newOperator);
+        operator = newOperator;
+    }
+
+    /// @notice Blocks new trades and deposits. Exits (release/refund/resolution) stay open.
+    function pause() external onlyOwner {
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    function unpause() external onlyOwner {
+        paused = false;
+        emit Unpaused(msg.sender);
+    }
+
     // ─── Trade Creation ───────────────────────────────────────────────────────
 
     function createTrade(
@@ -169,8 +254,7 @@ contract P2PEscrow {
         uint256 amount,
         uint64 lockDeadline,
         uint64 fiatDeadline
-    ) external {
-        require(msg.sender == backendSigner, "only backend");
+    ) external onlyOperator whenNotPaused {
         require(trades[tradeId].state == State.NONE, "trade exists");
         require(seller != address(0) && buyer != address(0), "zero address");
         require(seller != buyer, "seller == buyer");
@@ -192,7 +276,7 @@ contract P2PEscrow {
 
     // ─── Seller Deposit ───────────────────────────────────────────────────────
 
-    function deposit(bytes32 tradeId) external nonReentrant {
+    function deposit(bytes32 tradeId) external nonReentrant whenNotPaused {
         Trade storage t = trades[tradeId];
 
         require(t.state == State.CREATED, "not created");
@@ -214,19 +298,17 @@ contract P2PEscrow {
         nonReentrant
     {
         Trade storage t = trades[tradeId];
-
         require(t.state == State.LOCKED, "not locked");
-        require(block.timestamp <= expiresAt, "authorization expired");
 
-        bytes32 digest = _releaseDigest(tradeId, t.buyer, t.amount, expiresAt, nonce);
-
-        require(!usedDigest[digest], "digest used");
-        require(!usedNonces[tradeId][nonce], "nonce used");
-        require(_recoverSigner(digest, backendSig) == backendSigner, "invalid backend signature");
+        _consumeAuthorization(
+            tradeId,
+            _digest(RELEASE_TYPEHASH, tradeId, t.buyer, t.amount, expiresAt, nonce),
+            expiresAt,
+            nonce,
+            backendSig
+        );
 
         // CEI: update state before transfer
-        usedDigest[digest] = true;
-        usedNonces[tradeId][nonce] = true;
         t.state = State.RELEASED;
 
         _safeTransfer(_token(), t.buyer, t.amount);
@@ -263,18 +345,24 @@ contract P2PEscrow {
     // ─── Dispute ──────────────────────────────────────────────────────────────
 
     /**
-     * @notice Opens a dispute, freezing funds until backend resolves.
-     * @dev    FIX v2: Seller removed from allowed openers.
-     *         Seller opening their own dispute blocks legitimate refund deadlines
-     *         (a griefing vector against the buyer). Only buyer or backend can dispute.
+     * @notice Opens a dispute, freezing funds until resolved or timed out.
+     * @dev    Buyer may dispute only up to fiatDeadline (cannot block a due refund).
+     *         Operator may dispute any LOCKED trade (e.g. fraud signals).
+     *         Seller cannot dispute (v2 griefing fix).
      */
     function openDispute(bytes32 tradeId) external {
         Trade storage t = trades[tradeId];
 
         require(t.state == State.LOCKED, "cannot dispute");
-        require(msg.sender == t.buyer || msg.sender == backendSigner, "not allowed");
+
+        if (msg.sender == t.buyer) {
+            require(block.timestamp <= t.fiatDeadline, "dispute window closed");
+        } else {
+            require(msg.sender == operator, "not allowed");
+        }
 
         t.state = State.DISPUTE;
+        disputeOpenedAt[tradeId] = uint64(block.timestamp);
         emit DisputeOpened(tradeId, msg.sender);
     }
 
@@ -283,21 +371,19 @@ contract P2PEscrow {
     function resolveDisputeRelease(bytes32 tradeId, uint64 expiresAt, bytes32 nonce, bytes calldata backendSig)
         external
         nonReentrant
+        onlyOperator
     {
-        require(msg.sender == backendSigner, "only backend");
-
         Trade storage t = trades[tradeId];
         require(t.state == State.DISPUTE, "not in dispute");
-        require(block.timestamp <= expiresAt, "authorization expired");
 
-        bytes32 digest = _releaseDigest(tradeId, t.buyer, t.amount, expiresAt, nonce);
+        _consumeAuthorization(
+            tradeId,
+            _digest(RESOLVE_RELEASE_TYPEHASH, tradeId, t.buyer, t.amount, expiresAt, nonce),
+            expiresAt,
+            nonce,
+            backendSig
+        );
 
-        require(!usedDigest[digest], "digest used");
-        require(!usedNonces[tradeId][nonce], "nonce used");
-        require(_recoverSigner(digest, backendSig) == backendSigner, "invalid backend signature");
-
-        usedDigest[digest] = true;
-        usedNonces[tradeId][nonce] = true;
         t.state = State.RELEASED;
 
         _safeTransfer(_token(), t.buyer, t.amount);
@@ -309,21 +395,19 @@ contract P2PEscrow {
     function resolveDisputeRefund(bytes32 tradeId, uint64 expiresAt, bytes32 nonce, bytes calldata backendSig)
         external
         nonReentrant
+        onlyOperator
     {
-        require(msg.sender == backendSigner, "only backend");
-
         Trade storage t = trades[tradeId];
         require(t.state == State.DISPUTE, "not in dispute");
-        require(block.timestamp <= expiresAt, "authorization expired");
 
-        bytes32 digest = _refundDigest(tradeId, t.seller, t.amount, expiresAt, nonce);
+        _consumeAuthorization(
+            tradeId,
+            _digest(REFUND_TYPEHASH, tradeId, t.seller, t.amount, expiresAt, nonce),
+            expiresAt,
+            nonce,
+            backendSig
+        );
 
-        require(!usedDigest[digest], "digest used");
-        require(!usedNonces[tradeId][nonce], "nonce used");
-        require(_recoverSigner(digest, backendSig) == backendSigner, "invalid backend signature");
-
-        usedDigest[digest] = true;
-        usedNonces[tradeId][nonce] = true;
         t.state = State.REFUNDED;
 
         _safeTransfer(_token(), t.seller, t.amount);
@@ -332,35 +416,66 @@ contract P2PEscrow {
         emit DisputeResolved(tradeId, false);
     }
 
+    /**
+     * @notice Refunds the seller once a dispute has been unresolved for DISPUTE_TIMEOUT.
+     *         Callable by anyone — guarantees funds are never frozen permanently.
+     */
+    function claimDisputeTimeout(bytes32 tradeId) external nonReentrant {
+        Trade storage t = trades[tradeId];
+        require(t.state == State.DISPUTE, "not in dispute");
+        require(block.timestamp > uint256(disputeOpenedAt[tradeId]) + DISPUTE_TIMEOUT, "dispute not timed out");
+
+        t.state = State.REFUNDED;
+
+        _safeTransfer(_token(), t.seller, t.amount);
+
+        emit Refunded(tradeId, t.seller, t.amount);
+        emit DisputeTimedOut(tradeId, msg.sender);
+    }
+
     // ─── Public Digest Helpers (for scripts / cast) ───────────────────────────
 
     function releaseDigest(bytes32 tradeId, uint64 expiresAt, bytes32 nonce) external view returns (bytes32) {
         Trade storage t = trades[tradeId];
-        return _releaseDigest(tradeId, t.buyer, t.amount, expiresAt, nonce);
+        return _digest(RELEASE_TYPEHASH, tradeId, t.buyer, t.amount, expiresAt, nonce);
+    }
+
+    function resolveReleaseDigest(bytes32 tradeId, uint64 expiresAt, bytes32 nonce) external view returns (bytes32) {
+        Trade storage t = trades[tradeId];
+        return _digest(RESOLVE_RELEASE_TYPEHASH, tradeId, t.buyer, t.amount, expiresAt, nonce);
     }
 
     function refundDigest(bytes32 tradeId, uint64 expiresAt, bytes32 nonce) external view returns (bytes32) {
         Trade storage t = trades[tradeId];
-        return _refundDigest(tradeId, t.seller, t.amount, expiresAt, nonce);
+        return _digest(REFUND_TYPEHASH, tradeId, t.seller, t.amount, expiresAt, nonce);
     }
 
-    // ─── Internal Digest Builders (EIP-712) ──────────────────────────────────
+    // ─── Internal: Authorization ──────────────────────────────────────────────
 
-    function _releaseDigest(bytes32 tradeId, address buyer, uint256 amount, uint64 expiresAt, bytes32 nonce)
+    /// @dev Checks expiry, replay and signer, then marks the authorization used.
+    function _consumeAuthorization(
+        bytes32 tradeId,
+        bytes32 digest,
+        uint64 expiresAt,
+        bytes32 nonce,
+        bytes calldata backendSig
+    ) internal {
+        require(block.timestamp <= expiresAt, "authorization expired");
+        require(!usedDigest[digest], "digest used");
+        require(!usedNonces[tradeId][nonce], "nonce used");
+        require(_recoverSigner(digest, backendSig) == backendSigner, "invalid backend signature");
+
+        usedDigest[digest] = true;
+        usedNonces[tradeId][nonce] = true;
+    }
+
+    /// @dev EIP-712 digest. All three typehashes share the same field layout.
+    function _digest(bytes32 typehash, bytes32 tradeId, address party, uint256 amount, uint64 expiresAt, bytes32 nonce)
         internal
         view
         returns (bytes32)
     {
-        bytes32 structHash = keccak256(abi.encode(RELEASE_TYPEHASH, tradeId, buyer, amount, expiresAt, nonce));
-        return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
-    }
-
-    function _refundDigest(bytes32 tradeId, address seller, uint256 amount, uint64 expiresAt, bytes32 nonce)
-        internal
-        view
-        returns (bytes32)
-    {
-        bytes32 structHash = keccak256(abi.encode(REFUND_TYPEHASH, tradeId, seller, amount, expiresAt, nonce));
+        bytes32 structHash = keccak256(abi.encode(typehash, tradeId, party, amount, expiresAt, nonce));
         return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
     }
 
@@ -400,13 +515,16 @@ contract P2PEscrow {
     /**
      * @dev Handles ERC20s that don't return a bool (e.g. real USDT on some chains).
      *      Uses low-level call; reverts if call fails or returns false.
+     *      Also reverts if the token has no code (a call to an EOA would "succeed").
      */
     function _safeTransfer(address token, address to, uint256 amount) internal {
+        require(token.code.length > 0, "token has no code");
         (bool ok, bytes memory data) = token.call(abi.encodeWithSelector(IERC20.transfer.selector, to, amount));
         require(ok && (data.length == 0 || abi.decode(data, (bool))), "safeTransfer failed");
     }
 
     function _safeTransferFrom(address token, address from, address to, uint256 amount) internal {
+        require(token.code.length > 0, "token has no code");
         (bool ok, bytes memory data) =
             token.call(abi.encodeWithSelector(IERC20.transferFrom.selector, from, to, amount));
         require(ok && (data.length == 0 || abi.decode(data, (bool))), "safeTransferFrom failed");

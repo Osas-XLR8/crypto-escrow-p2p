@@ -10,7 +10,7 @@ import {
   useWaitForTransactionReceipt,
 } from "wagmi";
 import { formatUnits } from "viem";
-import { ESCROW_ABI, ESCROW_ADDRESS } from "@/config/escrow";
+import { ESCROW_ABI, ESCROW_ADDRESS, USDT_ADDRESS } from "@/config/escrow";
 import { resolveAuthMessage } from "@/lib/resolveAuth";
 import CreateTrade from "@/components/CreateTrade";
 
@@ -28,10 +28,6 @@ const USDT_ABI = [
     outputs: [{ name: "", type: "bool" }],
   },
 ] as const;
-
-const USDT_ADDRESS =
-  (process.env.NEXT_PUBLIC_USDT_ADDRESS as `0x${string}`) ??
-  "0x5FbDB2315678afecb367f032d93F642f64180aa3";
 
 // ─── State Machine ────────────────────────────────────────────────────────────
 
@@ -67,6 +63,14 @@ function fmtTs(ts: bigint) {
     day: "2-digit", month: "short", year: "numeric",
     hour: "2-digit", minute: "2-digit",
   });
+}
+function fmtDuration(secs: number) {
+  if (secs <= 0) return "now";
+  const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
+  return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${Math.max(m, 1)}m`;
+}
+function sameAddr(a?: string, b?: string) {
+  return !!a && !!b && a.toLowerCase() === b.toLowerCase();
 }
 function shortAddr(addr: string) {
   if (!addr || addr === "0x0000000000000000000000000000000000000000") return "—";
@@ -239,12 +243,42 @@ export default function Home() {
     query: { enabled: isConnected && tradeIdOk },
   });
 
+  const pausedRead   = useReadContract({ abi: ESCROW_ABI, address: escrowAddr, functionName: "paused", query: { enabled: isConnected } });
+  const operatorRead = useReadContract({ abi: ESCROW_ABI, address: escrowAddr, functionName: "operator", query: { enabled: isConnected } });
+  const timeoutRead  = useReadContract({ abi: ESCROW_ABI, address: escrowAddr, functionName: "DISPUTE_TIMEOUT", query: { enabled: isConnected } });
+  const openedRead   = useReadContract({
+    abi: ESCROW_ABI, address: escrowAddr,
+    functionName: "disputeOpenedAt",
+    args: tradeIdOk ? [tradeId.trim() as `0x${string}`] : undefined,
+    query: { enabled: isConnected && tradeIdOk },
+  });
+
+  // Ticking clock so deadline-based buttons enable themselves without a refresh.
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const id = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 5000);
+    return () => clearInterval(id);
+  }, []);
+
   const t          = read.data as TradeData | undefined;
   const stateNum   = (t?.[5] ?? 0) as number;
   const isCreated  = stateNum === State.CREATED;
   const isLocked   = stateNum === State.LOCKED;
   const isDispute  = stateNum === State.DISPUTE;
   const isTerminal = stateNum === State.RELEASED || stateNum === State.REFUNDED;
+
+  const isPaused   = pausedRead.data === true;
+  const isOperator = sameAddr(address, operatorRead.data as string | undefined);
+  const isSeller   = sameAddr(address, t?.[0]);
+  const isBuyer    = sameAddr(address, t?.[1]);
+  const role       = isOperator ? "OPERATOR" : isSeller ? "SELLER" : isBuyer ? "BUYER" : "VIEWER";
+
+  const fiatDeadline     = t ? Number(t[4]) : 0;
+  const disputeOpenedAt  = Number((openedRead.data as bigint | undefined) ?? 0n);
+  const disputeTimeout   = Number((timeoutRead.data as bigint | undefined) ?? 0n);
+  const timeoutAt        = disputeOpenedAt > 0 ? disputeOpenedAt + disputeTimeout : 0;
+  const timeoutClaimable = isDispute && timeoutAt > 0 && now > timeoutAt;
+  const buyerCanDispute  = isBuyer && now <= fiatDeadline;
 
   // ── Write hooks ─────────────────────────────────────────────────────────────
 
@@ -256,7 +290,9 @@ export default function Home() {
   const busy = approveWrite.isPending || approveReceipt.isLoading ||
                escrowWrite.isPending  || escrowReceipt.isLoading  || sigBusy;
 
-  const refetch = useCallback(() => { setTimeout(() => read.refetch(), 1200); }, [read]);
+  const refetch = useCallback(() => {
+    setTimeout(() => { read.refetch(); openedRead.refetch(); }, 1200);
+  }, [read, openedRead]);
 
   // ── Auto-deposit: step 2 fires after approve confirms ───────────────────────
 
@@ -324,7 +360,7 @@ export default function Home() {
     setSigError(null);
 
     try {
-      // Prove to the API that the connected wallet is the escrow's backendSigner.
+      // Prove to the API that the connected wallet is the escrow's operator.
       const issuedAt = Math.floor(Date.now() / 1000);
       const authSig = await signMessageAsync({
         message: resolveAuthMessage({
@@ -411,12 +447,18 @@ export default function Home() {
           {/* Network bar */}
           {isConnected && (
             <div style={{ display: "flex", background: "#0a1628", border: "1px solid #1e293b", borderRadius: 10, overflow: "hidden" }}>
-              {[{ k: "WALLET", v: shortAddr(address ?? "") }, { k: "CHAIN", v: String(chainId) }, { k: "CONTRACT", v: shortAddr(ESCROW_ADDRESS) }].map((item, i) => (
-                <div key={i} style={{ flex: 1, padding: "10px 16px", borderRight: i < 2 ? "1px solid #1e293b" : "none" }}>
+              {[{ k: "WALLET", v: shortAddr(address ?? "") }, { k: "ROLE", v: role }, { k: "CHAIN", v: String(chainId) }, { k: "CONTRACT", v: shortAddr(ESCROW_ADDRESS) }].map((item, i) => (
+                <div key={i} style={{ flex: 1, padding: "10px 16px", borderRight: i < 3 ? "1px solid #1e293b" : "none" }}>
                   <div style={{ fontSize: 9, color: "#334155", letterSpacing: "0.12em", marginBottom: 4 }}>{item.k}</div>
                   <code style={{ fontSize: 12, color: "#64748b" }}>{item.v}</code>
                 </div>
               ))}
+            </div>
+          )}
+
+          {isConnected && isPaused && (
+            <div style={{ padding: "12px 16px", borderRadius: 10, background: "#3d2e00", border: "1px solid #f59e0b60", color: "#fbbf24", fontSize: 13 }}>
+              ⏸ Escrow is <b>paused</b> — new trades and deposits are blocked. Releases, refunds and dispute exits still work.
             </div>
           )}
 
@@ -426,7 +468,7 @@ export default function Home() {
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <span style={{ width: 24, height: 24, borderRadius: 6, background: "#1e3a5f", color: "#60a5fa", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>+</span>
                 <span style={{ fontWeight: 700, fontSize: 14, color: "#f1f5f9" }}>Create New Trade</span>
-                <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 10, background: "#1e3a5f", color: "#60a5fa", letterSpacing: "0.06em" }}>BACKEND ONLY</span>
+                <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 10, background: "#1e3a5f", color: "#60a5fa", letterSpacing: "0.06em" }}>OPERATOR ONLY</span>
               </div>
               <span style={{ color: "#334155", fontSize: 12 }}>{showCreate ? "▲" : "▼"}</span>
             </button>
@@ -488,6 +530,16 @@ export default function Home() {
                     } />
                     <Field label="LOCK DEADLINE" value={<span style={{ color: "#94a3b8" }}>{fmtTs(t[3])}</span>} />
                     <Field label="FIAT DEADLINE" value={<span style={{ color: "#94a3b8" }}>{fmtTs(t[4])}</span>} />
+                    {disputeOpenedAt > 0 && (
+                      <Field label="DISPUTE OPENED" value={<span style={{ color: "#f87171" }}>{fmtTs(BigInt(disputeOpenedAt))}</span>} />
+                    )}
+                    {isDispute && timeoutAt > 0 && (
+                      <Field label="AUTO-REFUND UNLOCKS" value={
+                        <span style={{ color: timeoutClaimable ? "#34d399" : "#94a3b8" }}>
+                          {fmtTs(BigInt(timeoutAt))} · {timeoutClaimable ? "claimable now" : `in ${fmtDuration(timeoutAt - now)}`}
+                        </span>
+                      } />
+                    )}
                   </div>
 
                   {!isTerminal && (
@@ -497,8 +549,8 @@ export default function Home() {
 
                         <ActionBtn
                           label={depositLabel} sublabel="approve + deposit"
-                          enabled={isCreated && !busy}
-                          reason={!isCreated ? `Requires CREATED state (now: ${STATE_META[stateNum]?.label})` : undefined}
+                          enabled={isCreated && isSeller && !isPaused && !busy}
+                          reason={!isCreated ? `Requires CREATED state (now: ${STATE_META[stateNum]?.label})` : !isSeller ? "Only the seller can deposit" : isPaused ? "Escrow is paused" : undefined}
                           onClick={doDeposit} variant="primary"
                         />
 
@@ -511,9 +563,13 @@ export default function Home() {
                         />
 
                         <ActionBtn
-                          label="Open Dispute" sublabel="freezes funds"
-                          enabled={isLocked && !busy}
-                          reason={!isLocked ? `Requires LOCKED state (now: ${STATE_META[stateNum]?.label})` : undefined}
+                          label="Open Dispute" sublabel={isOperator ? "operator override" : "until fiat deadline"}
+                          enabled={isLocked && (isOperator || buyerCanDispute) && !busy}
+                          reason={
+                            !isLocked ? `Requires LOCKED state (now: ${STATE_META[stateNum]?.label})` :
+                            isBuyer ? "Dispute window closed (fiat deadline passed)" :
+                            "Only the buyer or operator can dispute"
+                          }
                           onClick={() => doSimple("openDispute")} variant="warning"
                         />
 
@@ -527,16 +583,26 @@ export default function Home() {
                         {isDispute && (
                           <>
                             <ActionBtn
+                              label="Claim Timeout Refund"
+                              sublabel={timeoutClaimable ? "anyone · refunds seller" : timeoutAt ? `unlocks in ${fmtDuration(timeoutAt - now)}` : "loading…"}
+                              enabled={timeoutClaimable && !busy}
+                              reason={timeoutClaimable ? undefined : "Dispute has not timed out yet"}
+                              onClick={() => doSimple("claimDisputeTimeout")}
+                              variant="ghost"
+                            />
+                            <ActionBtn
                               label={sigBusy ? "Signing…" : "Resolve → Buyer Wins"}
                               sublabel="1-click auto-sign"
-                              enabled={!busy}
+                              enabled={isOperator && !busy}
+                              reason={isOperator ? undefined : "Operator wallet only"}
                               onClick={() => doResolveAuto(true)}
                               variant="primary"
                             />
                             <ActionBtn
                               label={sigBusy ? "Signing…" : "Resolve → Seller Wins"}
                               sublabel="1-click auto-sign"
-                              enabled={!busy}
+                              enabled={isOperator && !busy}
+                              reason={isOperator ? undefined : "Operator wallet only"}
                               onClick={() => doResolveAuto(false)}
                               variant="danger"
                             />

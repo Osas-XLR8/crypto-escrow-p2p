@@ -66,48 +66,65 @@ State labels:
 - `5 = DISPUTE`
 
 Typical flow:
-1) Backend creates trade → state CREATED
+1) Operator creates trade → state CREATED
 2) Seller deposits tokens → state LOCKED
-3) Backend authorizes release → state RELEASED
-4) If dispute opened while locked → state DISPUTE
-5) Backend resolves dispute (release or refund)
+3) Anyone submits a backendSigner-signed release → state RELEASED
+4) Buyer (until fiatDeadline) or operator (any time) opens dispute → state DISPUTE
+5) Operator resolves dispute with a backendSigner signature (release or refund)
+6) If a dispute is unresolved for `DISPUTE_TIMEOUT` (7 days), anyone can call
+   `claimDisputeTimeout` → seller refunded
 
 ---
 
-## 5) Contract functions (high level)
+## 5) Contract functions (high level) — P2PEscrow v3
 
 Reads:
 - `trades(bytes32 tradeId) -> (seller, buyer, amount, lockDeadline, fiatDeadline, state)`
-- `releaseDigest(tradeId, expiresAt, nonce) -> bytes32`
-- `refundDigest(tradeId, expiresAt, nonce) -> bytes32`
+- `releaseDigest / resolveReleaseDigest / refundDigest(tradeId, expiresAt, nonce) -> bytes32`
+- `owner()`, `pendingOwner()`, `backendSigner()`, `operator()`, `paused()`
+- `disputeOpenedAt(tradeId) -> uint64`, `DISPUTE_TIMEOUT() -> uint64`
 
 Writes:
-- `createTrade(tradeId, seller, buyer, amount, lockDeadline, fiatDeadline)` (backend only)
-- `deposit(tradeId)` (seller only)
-- `refund(tradeId)`
-- `openDispute(tradeId)`
-- `release(tradeId, expiresAt, nonce, backendSig)` (authorized)
-- `resolveDisputeRelease(tradeId, expiresAt, nonce, backendSig)` (authorized)
-- `resolveDisputeRefund(tradeId, expiresAt, nonce, backendSig)` (authorized)
+- `createTrade(tradeId, seller, buyer, amount, lockDeadline, fiatDeadline)` (operator only, not paused)
+- `deposit(tradeId)` (seller only, not paused)
+- `refund(tradeId)` (anyone, after the relevant deadline, not in dispute)
+- `openDispute(tradeId)` (buyer until fiatDeadline, or operator)
+- `release(tradeId, expiresAt, nonce, backendSig)` (anyone, with `Release` signature)
+- `resolveDisputeRelease(tradeId, expiresAt, nonce, backendSig)` (operator, with `ResolveRelease` signature)
+- `resolveDisputeRefund(tradeId, expiresAt, nonce, backendSig)` (operator, with `Refund` signature)
+- `claimDisputeTimeout(tradeId)` (anyone, after dispute timeout → refunds seller)
+
+Admin (owner only):
+- `setBackendSigner(addr)`, `setOperator(addr)` — key rotation
+- `pause()` / `unpause()` — blocks createTrade + deposit ONLY; every exit path stays open
+- `transferOwnership(addr)` + `acceptOwnership()` — two-step
 
 ---
 
-## 6) Backend signer model (important)
+## 6) Roles & signature model (important)
 
-Sensitive actions require a valid backend signature:
+Three separate keys (they default to the deployer locally):
 
-- Backend creates a digest on-chain (via `releaseDigest` / `refundDigest`)
-- Backend signs the digest with the backend signer private key
-- Contract verifies:
-  - signature matches `backendSigner`
-  - `expiresAt` not expired
-  - digest not used before (replay protection)
-  - trade is in correct state
+| Role | Holds | Can do |
+|---|---|---|
+| `owner` | cold key / multisig | rotate signer/operator, pause, transfer ownership |
+| `backendSigner` | server-side key (`BACKEND_SIGNER_PRIVATE_KEY`) | sign EIP-712 authorizations only |
+| `operator` | hot wallet (connected in the UI) | create trades, open disputes, submit resolutions |
 
-This is used for:
-- `release`
-- `resolveDisputeRelease`
-- `resolveDisputeRefund`
+Dispute resolution needs BOTH the operator (tx sender) AND a backendSigner
+signature, so a single leaked key cannot move disputed funds.
+
+EIP-712 domain: `name="P2PEscrow"`, `version="3"`, chainId, verifyingContract.
+Each action has its own typehash (`Release`, `ResolveRelease`, `Refund`), so a
+signature for one action can never be replayed as another. The contract also
+checks expiry, digest/nonce replay, and rejects malleable (high-s) signatures.
+
+Signatures are over the raw EIP-712 digest — sign with `cast wallet sign --no-hash`.
+
+Frontend 1-click resolution: the operator wallet signs a short auth message
+(`src/lib/resolveAuth.ts`); `/api/escrow/sign-resolve` verifies the signer is the
+on-chain `operator` and that its own key matches `backendSigner`, then returns
+the EIP-712 signature.
 
 ---
 
@@ -164,12 +181,13 @@ Negative suite usually checks:
 
 The UI supports:
 - Wallet connect
-- Create trade (backend-only wallet required)
+- Create trade (operator wallet required)
 - Trade lookup by bytes32 tradeId
 - Deposit (seller)
 - Refund
-- Open Dispute
-- Display state and trade fields
+- Open Dispute (buyer before fiat deadline, or operator)
+- 1-click dispute resolution (operator) and Claim Timeout Refund (anyone, after 7 days)
+- Role badge, paused banner, dispute countdown
 
 Important UI rule:
 - Some actions should only be enabled depending on state:
@@ -182,32 +200,28 @@ Important UI rule:
 
 ## 10) Current status (as of latest work)
 
-- Deployment + smoke tests pass
-- Trade creation works
-- Deposit works when using the seller wallet
-- Dispute and release flows are tested
-- UI is functional for demo state-machine testing
+- P2PEscrow v3: role separation, key rotation, entry-only pause, dispute timeout
+- 48 Foundry tests incl. fuzz (99% line coverage on P2PEscrow.sol)
+- `demo-all.sh` (deploy + smoke + negative suite) passes with separate owner/signer/operator keys
+- Frontend builds; `/api/escrow/sign-resolve` requires operator wallet auth
+- CI (repo root `.github/workflows/ci.yml`): forge fmt/build/test + frontend typecheck/build
 
 ---
 
 ## 11) Next steps (what we should build next)
 
-### Demo completeness
-- Make UI enforce correct state-action gating
-- Improve UX: clearer status, error messages, tx links
+### Product
+- Trade discovery: index events so users don't have to paste tradeIds
+- Clearer UX: tx explorer links, per-role guided flows
 
 ### Backend for marketplace demo
-- Minimal API service:
-  - create trade requests
-  - store trades in DB
-  - compute tradeId deterministically
-  - generate signed authorizations for release/refund
+- Minimal API service + DB: create trade requests, deterministic tradeIds,
+  signed release authorizations after fiat confirmation
 
 ### Security hardening
-- Strict replay protection review
-- Ensure tradeId uniqueness
-- Ensure proper token handling
-- Tight access controls for backend-only calls
+- Invariant tests (token balance == sum of LOCKED/DISPUTE amounts)
+- Owner as multisig on any shared network; signer key in a KMS/HSM
+- External audit before real funds
 
 ---
 

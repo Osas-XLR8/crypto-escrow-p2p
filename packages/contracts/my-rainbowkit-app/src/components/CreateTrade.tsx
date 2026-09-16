@@ -72,11 +72,11 @@ export default function CreateTrade() {
         background: "#fff",
       }}
     >
-      <h2 style={{ marginTop: 0 }}>Create Trade (Backend Only)</h2>
+      <h2 style={{ marginTop: 0 }}>Create Trade (Operator Only)</h2>
 
       <p style={{ marginTop: 0, color: "#666" }}>
-        You must be connected with the <b>backendSigner</b> account or this will
-        fail with “only backend”.
+        You must be connected with the escrow&apos;s <b>operator</b> account or this will
+        fail with “only operator”.
       </p>
 
       <div style={{ display: "grid", gap: 10, maxWidth: 700 }}>
