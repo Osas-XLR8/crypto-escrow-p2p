@@ -1,2 +1,4 @@
 # Shell scripts run inside WSL/Linux: never convert them to CRLF on Windows checkouts.
 *.sh text eol=lf
+# forge fmt writes LF; keep Solidity LF on Windows checkouts too.
+*.sol text eol=lf
