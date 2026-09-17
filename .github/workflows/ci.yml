@@ -55,6 +55,13 @@ jobs:
           cache: npm
           cache-dependency-path: packages/contracts/my-rainbowkit-app/package-lock.json
 
+      # The app consumes @escrowx/sdk as a local file: dependency, so build it first.
+      - name: Build SDK
+        working-directory: packages/sdk
+        run: |
+          npm ci
+          npm run build
+
       - name: Install dependencies
         run: npm ci
 

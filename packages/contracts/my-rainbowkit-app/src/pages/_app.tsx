@@ -8,6 +8,7 @@ import { WagmiProvider } from "wagmi";
 import { RainbowKitProvider } from "@rainbow-me/rainbowkit";
 
 import { wagmiConfig } from "../wagmi";
+import { EscrowXProvider } from "@/context/EscrowX";
 
 const queryClient = new QueryClient();
 
@@ -16,7 +17,9 @@ export default function App({ Component, pageProps }: AppProps) {
     <WagmiProvider config={wagmiConfig}>
       <QueryClientProvider client={queryClient}>
         <RainbowKitProvider>
-          <Component {...pageProps} />
+          <EscrowXProvider>
+            <Component {...pageProps} />
+          </EscrowXProvider>
         </RainbowKitProvider>
       </QueryClientProvider>
     </WagmiProvider>

@@ -46,7 +46,10 @@ Contracts (Foundry):
   - `smoke-negative.sh`
   - `.deployments/.env` (generated after deploy)
 
-Frontend (Next.js):
+SDK (TypeScript client toolkit for v4):
+- `packages/sdk/` — signed offers on Nostr, encrypted trade chat, sealed evidence, typed contract client
+
+Frontend (Next.js, v4 reference client):
 - `packages/contracts/my-rainbowkit-app/`
   - `src/pages/index.tsx`
   - `src/components/CreateTrade.tsx`
@@ -205,8 +208,9 @@ Important UI rule:
 - `demo-all.sh` (deploy + smoke + negative suite) passes with separate owner/signer/operator keys
 - Frontend builds; `/api/escrow/sign-resolve` requires operator wallet auth
 - CI (repo root `.github/workflows/ci.yml`): forge fmt/build/test + frontend typecheck/build
-- Live trade list + per-trade activity timeline rebuilt from contract events
-  (`src/lib/tradeIndex.ts`, `src/hooks/useTradeIndex.ts`); set `NEXT_PUBLIC_ESCROW_DEPLOY_BLOCK` on real networks
+- v4 redesign underway on branches (see git log): EscrowCoreV4 (no platform control over funds),
+  loser-pays arbitration + fallback arbitrator + licensed-firm adapter, @escrowx/sdk, and the web app
+  migrated to v4 (Market / Sell / Trades, relay offer book, encrypted chat, sealed evidence)
 
 ---
 

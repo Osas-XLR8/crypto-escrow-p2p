@@ -14,7 +14,8 @@ A minimal, investor-safe P2P escrow demo:
 - **Solidity escrow contract** (state machine + replay protection)
 - **Foundry tests** (basic + negative suite)
 - **Local dev scripts** (deploy + smoke tests)
-- **Next.js frontend** (RainbowKit/Wagmi) for demo interactions
+- **Client SDK** (`packages/sdk`): signed offers on Nostr relays, end-to-end encrypted trade chat, encrypted dispute evidence, typed v4 contract client
+- **Next.js web app** (RainbowKit/Wagmi): v4 reference client — relay order book, encrypted chat, disputes
 
 ## Quick Demo (Local)
 ### 1) Start local chain
