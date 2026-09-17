@@ -1,0 +1,29 @@
+{
+  "name": "@escrowx/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "gen:abi": "node scripts/gen-abi.mjs",
+    "test": "vitest run test/unit",
+    "test:e2e": "vitest run test/e2e"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.25.2",
+    "viem": "^2.56.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.3",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.5.4",
+    "vitest": "^5.0.1",
+    "ws": "^8.21.3"
+  }
+}

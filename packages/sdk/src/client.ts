@@ -1,0 +1,230 @@
+// src/client.ts — typed wrapper around EscrowCoreV4 for wallets and apps.
+// Every write is simulated first so contract revert reasons surface before the user signs.
+
+import {
+  erc20Abi,
+  parseEventLogs,
+  type Account,
+  type Address,
+  type Chain,
+  type Hex,
+  type PublicClient,
+  type WalletClient,
+} from "viem";
+import { escrowCoreV4Abi } from "./abi/escrowCoreV4.js";
+import { licensedArbitratorAdapterAbi } from "./abi/licensedArbitratorAdapter.js";
+import type { Offer } from "./types.js";
+
+export enum TradeState {
+  NONE = 0,
+  LOCKED = 1,
+  PAID = 2,
+  FEE_PENDING = 3,
+  DISPUTED = 4,
+  RELEASED = 5,
+  CANCELLED = 6,
+}
+
+export type OnchainTrade = {
+  seller: Address;
+  buyer: Address;
+  token: Address;
+  arbitrator: Address;
+  fallbackArbitrator: Address;
+  activeArbitrator: Address;
+  amount: bigint;
+  offerHash: Hex;
+  termsHash: Hex;
+  paymentDeadline: bigint;
+  releaseWindow: bigint;
+  releaseDeadline: bigint;
+  state: TradeState;
+};
+
+export type OnchainDispute = {
+  opener: Address;
+  feeDeadline: bigint;
+  startedAt: bigint;
+  escalated: boolean;
+  disputeId: bigint;
+  paidBuyer: bigint;
+  paidSeller: bigint;
+  pool: bigint;
+};
+
+export class EscrowV4Client {
+  constructor(
+    readonly publicClient: PublicClient,
+    readonly escrow: Address,
+    readonly walletClient?: WalletClient
+  ) {}
+
+  // ─── Reads ──────────────────────────────────────────────────────────────────
+
+  async getTrade(tradeId: bigint): Promise<OnchainTrade> {
+    const t = await this.publicClient.readContract({ address: this.escrow, abi: escrowCoreV4Abi, functionName: "getTrade", args: [tradeId] });
+    return { ...t, state: Number(t.state) as TradeState };
+  }
+
+  async getDispute(tradeId: bigint): Promise<OnchainDispute> {
+    return this.publicClient.readContract({ address: this.escrow, abi: escrowCoreV4Abi, functionName: "getDispute", args: [tradeId] });
+  }
+
+  /** Amount still takeable from an offer, considering cancellation, nonce, expiry, fills and seller balance. */
+  remaining(offer: Offer): Promise<bigint> {
+    return this.publicClient.readContract({ address: this.escrow, abi: escrowCoreV4Abi, functionName: "remaining", args: [offer] });
+  }
+
+  onchainOfferHash(offer: Offer): Promise<Hex> {
+    return this.publicClient.readContract({ address: this.escrow, abi: escrowCoreV4Abi, functionName: "hashOffer", args: [offer] });
+  }
+
+  sellerNonce(seller: Address): Promise<bigint> {
+    return this.publicClient.readContract({ address: this.escrow, abi: escrowCoreV4Abi, functionName: "sellerNonce", args: [seller] });
+  }
+
+  freeBalance(seller: Address, token: Address): Promise<bigint> {
+    return this.publicClient.readContract({ address: this.escrow, abi: escrowCoreV4Abi, functionName: "freeBalance", args: [seller, token] });
+  }
+
+  claimableNative(account: Address): Promise<bigint> {
+    return this.publicClient.readContract({ address: this.escrow, abi: escrowCoreV4Abi, functionName: "claimableNative", args: [account] });
+  }
+
+  arbitrationCost(arbitrator: Address): Promise<bigint> {
+    return this.publicClient.readContract({ address: arbitrator, abi: licensedArbitratorAdapterAbi, functionName: "arbitrationCost", args: ["0x"] });
+  }
+
+  /** The buyer's evidence commitment from markPaid, read from the PaymentMarked event. */
+  async paymentCommitment(tradeId: bigint, fromBlock = 0n): Promise<Hex | null> {
+    const logs = await this.publicClient.getContractEvents({
+      address: this.escrow,
+      abi: escrowCoreV4Abi,
+      eventName: "PaymentMarked",
+      args: { tradeId },
+      fromBlock,
+    });
+    return logs.at(-1)?.args.evidenceCommitment ?? null;
+  }
+
+  /** ERC-1497 evidence pointers submitted for a trade, oldest first. */
+  async evidence(tradeId: bigint, fromBlock = 0n): Promise<{ party: Address; uri: string; arbitrator: Address }[]> {
+    const logs = await this.publicClient.getContractEvents({
+      address: this.escrow,
+      abi: escrowCoreV4Abi,
+      eventName: "Evidence",
+      args: { evidenceGroupID: tradeId },
+      fromBlock,
+    });
+    return logs.map((l) => ({ party: l.args.party!, uri: l.args.evidence!, arbitrator: l.args.arbitrator! }));
+  }
+
+  // ─── Writes ─────────────────────────────────────────────────────────────────
+
+  private wallet(): { wallet: WalletClient; account: Account; chain: Chain | undefined } {
+    const wallet = this.walletClient;
+    if (!wallet?.account) throw new Error("a wallet client with an account is required for writes");
+    return { wallet, account: wallet.account, chain: wallet.chain };
+  }
+
+  private async write(functionName: string, args: readonly unknown[], value?: bigint) {
+    const { wallet, account, chain } = this.wallet();
+    const { request } = await this.publicClient.simulateContract({
+      address: this.escrow,
+      abi: escrowCoreV4Abi,
+      functionName: functionName as never,
+      args: args as never,
+      account,
+      value,
+    } as never);
+    const hash = await wallet.writeContract({ ...(request as object), chain } as never);
+    const receipt = await this.publicClient.waitForTransactionReceipt({ hash });
+    if (receipt.status !== "success") throw new Error(`${functionName} reverted (${hash})`);
+    return receipt;
+  }
+
+  /** Approves exactly `amount` (never unlimited) and deposits it into the seller vault. */
+  async deposit(token: Address, amount: bigint) {
+    const { wallet, account, chain } = this.wallet();
+    const { request } = await this.publicClient.simulateContract({
+      address: token,
+      abi: erc20Abi,
+      functionName: "approve",
+      args: [this.escrow, amount],
+      account,
+    });
+    const approveHash = await wallet.writeContract({ ...request, chain } as never);
+    await this.publicClient.waitForTransactionReceipt({ hash: approveHash });
+    return this.write("deposit", [token, amount]);
+  }
+
+  withdraw(token: Address, amount: bigint) {
+    return this.write("withdraw", [token, amount]);
+  }
+
+  bumpNonce() {
+    return this.write("bumpNonce", []);
+  }
+
+  cancelOffer(offer: Offer) {
+    return this.write("cancelOffer", [offer]);
+  }
+
+  /** Locks the seller's funds and returns the new trade id. */
+  async takeOffer(offer: Offer, signature: Hex, amount: bigint): Promise<bigint> {
+    const receipt = await this.write("takeOffer", [offer, signature, amount]);
+    const [opened] = parseEventLogs({ abi: escrowCoreV4Abi, eventName: "TradeOpened", logs: receipt.logs });
+    if (!opened) throw new Error("TradeOpened event not found");
+    return opened.args.tradeId;
+  }
+
+  markPaid(tradeId: bigint, evidenceCommitment: Hex) {
+    return this.write("markPaid", [tradeId, evidenceCommitment]);
+  }
+
+  release(tradeId: bigint) {
+    return this.write("release", [tradeId]);
+  }
+
+  buyerCancel(tradeId: bigint) {
+    return this.write("buyerCancel", [tradeId]);
+  }
+
+  cancelUnpaid(tradeId: bigint) {
+    return this.write("cancelUnpaid", [tradeId]);
+  }
+
+  async openDispute(tradeId: bigint) {
+    const trade = await this.getTrade(tradeId);
+    return this.write("openDispute", [tradeId], await this.arbitrationCost(trade.arbitrator));
+  }
+
+  async payArbitrationFee(tradeId: bigint): Promise<bigint> {
+    const trade = await this.getTrade(tradeId);
+    await this.write("payArbitrationFee", [tradeId], await this.arbitrationCost(trade.arbitrator));
+    return (await this.getDispute(tradeId)).disputeId;
+  }
+
+  /** Pays only the shortfall between the fallback's fee and what the dispute pool already holds. */
+  async escalateToFallback(tradeId: bigint) {
+    const [trade, dispute] = await Promise.all([this.getTrade(tradeId), this.getDispute(tradeId)]);
+    const cost = await this.arbitrationCost(trade.fallbackArbitrator);
+    return this.write("escalateToFallback", [tradeId], cost > dispute.pool ? cost - dispute.pool : 0n);
+  }
+
+  claimFeeTimeout(tradeId: bigint) {
+    return this.write("claimFeeTimeout", [tradeId]);
+  }
+
+  claimArbitrationTimeout(tradeId: bigint) {
+    return this.write("claimArbitrationTimeout", [tradeId]);
+  }
+
+  submitEvidence(tradeId: bigint, uri: string) {
+    return this.write("submitEvidence", [tradeId, uri]);
+  }
+
+  withdrawNative() {
+    return this.write("withdrawNative", []);
+  }
+}

@@ -63,3 +63,46 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  sdk:
+    name: SDK (offers, chat, evidence, v4 client)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/sdk
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/sdk/package-lock.json
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check generated ABIs are current
+        run: |
+          (cd ../contracts && forge build)
+          npm run gen:abi
+          git diff --exit-code -- src/abi
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Unit + relay tests
+        run: npm test
+
+      - name: End-to-end against Anvil
+        run: ./scripts/e2e-anvil.sh
