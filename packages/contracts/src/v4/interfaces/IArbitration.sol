@@ -17,6 +17,12 @@ interface IArbitrable {
     function rule(uint256 disputeID, uint256 ruling) external;
 }
 
+/// @notice Lets an arbitrator look up who is party to a dispute (e.g. for conflict-of-interest checks)
+///         without relying on extraData, which Kleros courts interpret as court configuration.
+interface IDisputeParties {
+    function disputeParties(address arbitrator, uint256 disputeID) external view returns (address buyer, address seller);
+}
+
 /// @notice ERC-1497 evidence events, consumed by arbitrator front ends.
 interface IEvidence {
     event Evidence(

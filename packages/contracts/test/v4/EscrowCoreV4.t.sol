@@ -1,131 +1,44 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Test} from "forge-std/Test.sol";
 import {EscrowCoreV4} from "../../src/v4/EscrowCoreV4.sol";
-import {MockUSDT} from "../../src/MockUSDT.sol";
 import {MockArbitrator, NoReturnToken, FeeOnTransferToken, SmartWallet} from "./Mocks.sol";
+import {V4TestBase} from "./V4TestBase.sol";
 
-contract EscrowCoreV4Test is Test {
-    EscrowCoreV4 escrow;
-    MockUSDT usdt;
-    MockArbitrator arb;
-
-    uint256 sellerPk = 0xA11CE;
-    address seller = vm.addr(sellerPk);
-    address buyer = vm.addr(0xB0B);
-    address stranger = vm.addr(0x5757);
-
-    uint256 constant U = 1e6; // 1 USDT
-    uint64 constant PAY_WINDOW = 30 minutes;
-    uint64 constant RELEASE_WINDOW = 1 hours;
-    uint64 constant ARB_TIMEOUT = 30 days;
-    uint256 constant SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
-
-    uint256 saltCounter;
-
-    function setUp() public {
-        usdt = new MockUSDT("Tether USD", "USDT", 6);
-        arb = new MockArbitrator();
-        escrow = _deploy(address(usdt), address(arb));
-
-        usdt.mint(seller, 100_000 * U);
-        vm.startPrank(seller);
-        usdt.approve(address(escrow), type(uint256).max);
-        escrow.deposit(address(usdt), 10_000 * U);
-        vm.stopPrank();
-
-        vm.deal(buyer, 10 ether);
-        vm.deal(seller, 10 ether);
-        vm.deal(stranger, 10 ether);
-    }
-
-    // ─── Helpers ──────────────────────────────────────────────────────────────
-
-    function _deploy(address token, address arbitrator) internal returns (EscrowCoreV4) {
-        address[] memory tokens = new address[](1);
-        tokens[0] = token;
-        address[] memory arbs = new address[](1);
-        arbs[0] = arbitrator;
-        return new EscrowCoreV4(tokens, arbs, ARB_TIMEOUT);
-    }
-
-    function _offer() internal returns (EscrowCoreV4.Offer memory o) {
-        o = EscrowCoreV4.Offer({
-            seller: seller,
-            token: address(usdt),
-            minAmount: 10 * U,
-            maxAmount: 1_000 * U,
-            totalAmount: 5_000 * U,
-            paymentWindow: PAY_WINDOW,
-            releaseWindow: RELEASE_WINDOW,
-            arbitrator: address(arb),
-            termsHash: keccak256("NGN|1600.00|bank-transfer"),
-            nonce: 0,
-            expiry: uint64(block.timestamp + 1 days),
-            salt: bytes32(++saltCounter)
-        });
-    }
-
-    function _sign(uint256 pk, bytes32 digest) internal pure returns (bytes memory) {
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
-        return abi.encodePacked(r, s, v);
-    }
-
-    function _signOffer(EscrowCoreV4 e, EscrowCoreV4.Offer memory o) internal view returns (bytes memory) {
-        return _sign(sellerPk, e.hashOffer(o));
-    }
-
-    function _take(EscrowCoreV4.Offer memory o, uint256 amount) internal returns (uint256) {
-        bytes memory sig = _signOffer(escrow, o);
-        vm.prank(buyer);
-        return escrow.takeOffer(o, sig, amount);
-    }
-
-    function _open(uint256 amount) internal returns (uint256) {
-        return _take(_offer(), amount);
-    }
-
-    function _paid(uint256 amount) internal returns (uint256 id) {
-        id = _open(amount);
-        vm.prank(buyer);
-        escrow.markPaid(id, keccak256("evidence"));
-    }
-
-    function _disputed(uint256 amount) internal returns (uint256 id) {
-        id = _paid(amount);
-        uint256 fee = arb.cost();
-        vm.prank(seller);
-        escrow.openDispute{value: fee}(id);
-    }
-
-    function _state(uint256 id) internal view returns (EscrowCoreV4.State) {
-        return escrow.getTrade(id).state;
-    }
-
+contract EscrowCoreV4Test is V4TestBase {
     // ─── Deployment: nothing is adjustable afterwards ─────────────────────────
 
     function testConstructorValidation() public {
         address[] memory none = new address[](0);
         address[] memory one = new address[](1);
         one[0] = address(usdt);
-        address[] memory arbs = new address[](1);
+        address[] memory arbs = new address[](2);
         arbs[0] = address(arb);
+        arbs[1] = address(arb2);
+        address[] memory onlyOneArb = new address[](1);
+        onlyOneArb[0] = address(arb);
         address[] memory eoa = new address[](1);
         eoa[0] = address(0xdead);
+        address[] memory eoaArbs = new address[](2);
+        eoaArbs[0] = address(arb);
+        eoaArbs[1] = address(0xdead);
 
         vm.expectRevert("no tokens");
-        new EscrowCoreV4(none, arbs, ARB_TIMEOUT);
-        vm.expectRevert("no arbitrators");
-        new EscrowCoreV4(one, none, ARB_TIMEOUT);
+        new EscrowCoreV4(none, arbs, ARB_TIMEOUT, FEE_TIMEOUT);
+        vm.expectRevert("need primary and fallback arbitrators");
+        new EscrowCoreV4(one, onlyOneArb, ARB_TIMEOUT, FEE_TIMEOUT);
         vm.expectRevert("bad arbitration timeout");
-        new EscrowCoreV4(one, arbs, 6 days);
+        new EscrowCoreV4(one, arbs, 6 days, FEE_TIMEOUT);
         vm.expectRevert("bad arbitration timeout");
-        new EscrowCoreV4(one, arbs, 91 days);
+        new EscrowCoreV4(one, arbs, 91 days, FEE_TIMEOUT);
+        vm.expectRevert("bad fee timeout");
+        new EscrowCoreV4(one, arbs, ARB_TIMEOUT, 12 hours);
+        vm.expectRevert("bad fee timeout");
+        new EscrowCoreV4(one, arbs, ARB_TIMEOUT, 8 days);
         vm.expectRevert("token has no code");
-        new EscrowCoreV4(eoa, arbs, ARB_TIMEOUT);
+        new EscrowCoreV4(eoa, arbs, ARB_TIMEOUT, FEE_TIMEOUT);
         vm.expectRevert("arbitrator has no code");
-        new EscrowCoreV4(one, eoa, ARB_TIMEOUT);
+        new EscrowCoreV4(one, eoaArbs, ARB_TIMEOUT, FEE_TIMEOUT);
     }
 
     /// Principle 1: the contract exposes no owner / pause / upgrade / role-management surface.
@@ -227,7 +140,8 @@ contract EscrowCoreV4Test is Test {
         bytes32 structHash = keccak256(
             bytes.concat(
                 abi.encode(escrow.OFFER_TYPEHASH(), o.seller, o.token, o.minAmount, o.maxAmount, o.totalAmount),
-                abi.encode(o.paymentWindow, o.releaseWindow, o.arbitrator, o.termsHash, o.nonce, o.expiry, o.salt)
+                abi.encode(o.paymentWindow, o.releaseWindow, o.arbitrator, o.fallbackArbitrator),
+                abi.encode(o.termsHash, o.nonce, o.expiry, o.salt)
             )
         );
         assertEq(escrow.hashOffer(o), keccak256(abi.encodePacked("\x19\x01", domain, structHash)));
@@ -427,7 +341,7 @@ contract EscrowCoreV4Test is Test {
         uint256 free = escrow.freeBalance(seller, address(usdt));
 
         vm.startPrank(caller);
-        uint256 a = action % 9;
+        uint256 a = action % 12;
         bool ok;
         if (a == 0) {
             (ok,) = address(escrow).call(abi.encodeCall(EscrowCoreV4.release, (paid)));
@@ -445,8 +359,15 @@ contract EscrowCoreV4Test is Test {
             (ok,) = address(escrow).call(abi.encodeCall(EscrowCoreV4.claimArbitrationTimeout, (disputed)));
         } else if (a == 7) {
             (ok,) = address(escrow).call(abi.encodeCall(EscrowCoreV4.withdraw, (address(usdt), 1)));
-        } else {
+        } else if (a == 8) {
             (ok,) = address(escrow).call(abi.encodeCall(EscrowCoreV4.release, (disputed)));
+        } else if (a == 9) {
+            (ok,) = address(escrow).call{value: 0.5 ether}(abi.encodeCall(EscrowCoreV4.payArbitrationFee, (paid)));
+        } else if (a == 10) {
+            vm.warp(block.timestamp + 90 days);
+            (ok,) = address(escrow).call{value: 0.5 ether}(abi.encodeCall(EscrowCoreV4.escalateToFallback, (disputed)));
+        } else {
+            (ok,) = address(escrow).call(abi.encodeCall(EscrowCoreV4.withdrawNative, ()));
         }
         vm.stopPrank();
 
@@ -556,7 +477,11 @@ contract EscrowCoreV4Test is Test {
         vm.warp(block.timestamp + RELEASE_WINDOW + 1);
         uint256 fee = arb.cost();
         vm.prank(buyer);
-        uint256 disputeId = escrow.openDispute{value: fee}(id);
+        escrow.openDispute{value: fee}(id);
+        assertEq(uint256(_state(id)), uint256(EscrowCoreV4.State.FEE_PENDING));
+
+        vm.prank(seller);
+        uint256 disputeId = escrow.payArbitrationFee{value: fee}(id);
         assertEq(escrow.disputeToTrade(address(arb), disputeId), id);
         assertEq(uint256(_state(id)), uint256(EscrowCoreV4.State.DISPUTED));
     }
@@ -566,7 +491,7 @@ contract EscrowCoreV4Test is Test {
         uint256 fee = arb.cost();
         vm.prank(seller);
         escrow.openDispute{value: fee}(id);
-        assertEq(uint256(_state(id)), uint256(EscrowCoreV4.State.DISPUTED));
+        assertEq(uint256(_state(id)), uint256(EscrowCoreV4.State.FEE_PENDING));
     }
 
     function testDisputeFeeRequiredAndExcessRefunded() public {
@@ -579,14 +504,20 @@ contract EscrowCoreV4Test is Test {
         uint256 before = seller.balance;
         vm.prank(seller);
         escrow.openDispute{value: 1 ether}(id);
+        // Overpayment is credited for withdrawal (pull payments), not pushed back.
+        assertEq(escrow.claimableNative(seller), 1 ether - fee);
+        assertEq(escrow.getDispute(id).pool, fee);
+        assertEq(address(escrow).balance, 1 ether);
+        assertEq(address(arb).balance, 0); // no dispute exists until the counterparty pays
+
+        vm.prank(seller);
+        escrow.withdrawNative();
         assertEq(seller.balance, before - fee);
-        assertEq(address(arb).balance, fee);
-        assertEq(address(escrow).balance, 0);
     }
 
     function testRulingForBuyer() public {
         uint256 id = _disputed(400 * U);
-        arb.giveRuling(escrow.getTrade(id).disputeId, 1);
+        arb.giveRuling(_disputeId(id), 1);
         assertEq(usdt.balanceOf(buyer), 400 * U);
         assertEq(uint256(_state(id)), uint256(EscrowCoreV4.State.RELEASED));
     }
@@ -594,8 +525,8 @@ contract EscrowCoreV4Test is Test {
     function testRulingForSellerAndRefusalRestoreSeller() public {
         uint256 a = _disputed(400 * U);
         uint256 b = _disputed(100 * U);
-        arb.giveRuling(escrow.getTrade(a).disputeId, 2);
-        arb.giveRuling(escrow.getTrade(b).disputeId, 0);
+        arb.giveRuling(_disputeId(a), 2);
+        arb.giveRuling(_disputeId(b), 0);
         assertEq(escrow.freeBalance(seller, address(usdt)), 10_000 * U);
         assertEq(usdt.balanceOf(buyer), 0);
         assertEq(uint256(_state(a)), uint256(EscrowCoreV4.State.CANCELLED));
@@ -604,7 +535,7 @@ contract EscrowCoreV4Test is Test {
 
     function testInvalidOrForeignRulingsRejected() public {
         uint256 id = _disputed(100 * U);
-        uint256 disputeId = escrow.getTrade(id).disputeId;
+        uint256 disputeId = _disputeId(id);
 
         vm.expectRevert("invalid ruling");
         arb.giveRuling(disputeId, 3);
@@ -625,21 +556,22 @@ contract EscrowCoreV4Test is Test {
         vm.prank(seller);
         escrow.release(id);
 
-        arb.giveRuling(escrow.getTrade(id).disputeId, 2); // must not revert or claw back
+        arb.giveRuling(_disputeId(id), 2); // must not revert or claw back
         assertEq(usdt.balanceOf(buyer), 100 * U);
         assertEq(uint256(_state(id)), uint256(EscrowCoreV4.State.RELEASED));
 
         uint256 id2 = _disputed(100 * U);
         vm.prank(buyer);
         escrow.buyerCancel(id2);
-        arb.giveRuling(escrow.getTrade(id2).disputeId, 1);
+        arb.giveRuling(_disputeId(id2), 1);
         assertEq(usdt.balanceOf(buyer), 100 * U); // unchanged
         assertEq(uint256(_state(id2)), uint256(EscrowCoreV4.State.CANCELLED));
     }
 
     function testArbitrationTimeoutPreventsPermanentFreeze() public {
         uint256 id = _disputed(700 * U);
-        vm.warp(block.timestamp + ARB_TIMEOUT);
+        // Nobody escalated: terminal default only after 2 x timeout.
+        vm.warp(block.timestamp + 2 * uint256(ARB_TIMEOUT));
         vm.expectRevert("arbitration ongoing");
         escrow.claimArbitrationTimeout(id);
 
@@ -699,14 +631,16 @@ contract EscrowCoreV4Test is Test {
             uint256 fee = arb.cost();
             vm.prank(seller);
             escrow.openDispute{value: fee}(id);
-            uint256 d = escrow.getTrade(id).disputeId;
+            vm.prank(buyer);
+            escrow.payArbitrationFee{value: fee}(id);
+            uint256 d = _disputeId(id);
             if (path == 2) {
                 arb.giveRuling(d, 1);
                 buyerPaid = true;
             } else if (path == 3) {
                 arb.giveRuling(d, 2);
             } else if (path == 4) {
-                vm.warp(block.timestamp + ARB_TIMEOUT + 1);
+                vm.warp(block.timestamp + 2 * uint256(ARB_TIMEOUT) + 1);
                 escrow.claimArbitrationTimeout(id);
             } else if (path == 5) {
                 vm.prank(seller);

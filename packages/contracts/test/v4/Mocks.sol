@@ -104,3 +104,20 @@ contract SmartWallet {
         require(ok, "exec failed");
     }
 }
+
+/// @notice A contract party that refuses native currency (tests that pull payments can't be griefed).
+contract EtherRejectingActor {
+    function exec(address target, uint256 value, bytes calldata data) external returns (bytes memory) {
+        (bool ok, bytes memory ret) = target.call{value: value}(data);
+        if (!ok) {
+            assembly {
+                revert(add(ret, 32), mload(ret))
+            }
+        }
+        return ret;
+    }
+
+    receive() external payable {
+        revert("no ether accepted");
+    }
+}
