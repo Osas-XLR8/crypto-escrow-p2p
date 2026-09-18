@@ -2,22 +2,23 @@
 
 import { useMemo, useState } from "react";
 import { StateBadge } from "@/components/StateBadge";
-import { Card, colors, mono } from "@/components/ui";
+import { Card, Empty, Notice } from "@/components/ui";
+import { V4 } from "@/config/v4";
 import { fmtAgo, shortAddr } from "@/lib/format";
 import { fmtToken } from "@/lib/v4/local";
 import { V4State, nextStep, roles, type TradeSummary } from "@/lib/v4/tradeIndex";
 
-type Filter = "mine" | "action" | "open" | "all";
+type Filter = "action" | "mine" | "open" | "all";
 const FILTERS: { key: Filter; label: string }[] = [
+  { key: "action", label: "To do" },
   { key: "mine", label: "Mine" },
-  { key: "action", label: "Needs my action" },
   { key: "open", label: "Open" },
   { key: "all", label: "All" },
 ];
 
 const isOpen = (t: TradeSummary) => t.state !== V4State.RELEASED && t.state !== V4State.CANCELLED;
 
-export function TradesPanel({ trades, address, chainNow, arbitrationTimeout, selectedId, onSelect, error }: {
+export function TradesPanel({ trades, address, chainNow, arbitrationTimeout, selectedId, onSelect, error, isLoading, onBrowse }: {
   trades: TradeSummary[];
   address?: string;
   chainNow: number;
@@ -25,78 +26,87 @@ export function TradesPanel({ trades, address, chainNow, arbitrationTimeout, sel
   selectedId?: bigint;
   onSelect: (id: bigint) => void;
   error: Error | null;
+  isLoading: boolean;
+  onBrowse: () => void;
 }) {
-  const [filter, setFilter] = useState<Filter>("mine");
   const rows = useMemo(
     () => trades.map((t) => ({ t, step: nextStep(t, { address, chainNow, arbitrationTimeout }), r: roles(t, address) })),
     [trades, address, chainNow, arbitrationTimeout]
   );
   const counts: Record<Filter, number> = {
-    mine: rows.filter((x) => x.r.isBuyer || x.r.isSeller).length,
     action: rows.filter((x) => x.step.mine).length,
+    mine: rows.filter((x) => x.r.isBuyer || x.r.isSeller).length,
     open: rows.filter((x) => isOpen(x.t)).length,
     all: rows.length,
   };
+  const [filter, setFilter] = useState<Filter | null>(null);
+  // Default to "To do" when there is something to do, otherwise "Mine".
+  const active: Filter = filter ?? (counts.action > 0 ? "action" : "mine");
   const visible = rows.filter(({ t, step, r }) =>
-    filter === "mine" ? r.isBuyer || r.isSeller : filter === "action" ? step.mine : filter === "open" ? isOpen(t) : true
+    active === "mine" ? r.isBuyer || r.isSeller : active === "action" ? step.mine : active === "open" ? isOpen(t) : true
   );
 
   return (
     <Card
-      title={<>TRADES <span style={{ color: error ? colors.redText : colors.greenText, marginLeft: 8 }}>● {error ? "OFFLINE" : "LIVE"}</span></>}
+      flush
+      title={
+        <>
+          Trades
+          <span className={`chip ${error ? "chip-danger" : "chip-accent"}`} title={error ? error.message : "Reading the escrow contract directly"}>
+            <span className="dot dot-live" aria-hidden />
+            {error ? "offline" : "live"}
+          </span>
+        </>
+      }
       right={
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {FILTERS.map(({ key, label }) => {
-            const active = filter === key;
-            const urgent = key === "action" && counts.action > 0;
-            return (
-              <button key={key} onClick={() => setFilter(key)} style={{
-                padding: "5px 11px", borderRadius: 16, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                background: active ? "#1e3a5f" : "transparent", color: active ? "#93c5fd" : "#64748b",
-                border: `1px solid ${active ? colors.blue : colors.border}`, display: "inline-flex", gap: 6, alignItems: "center",
-              }}>
-                {label}
-                <span style={{ minWidth: 18, padding: "0 5px", borderRadius: 9, fontSize: 10, lineHeight: "16px", background: urgent ? colors.amber : "#0f172a", color: urgent ? "#0f172a" : colors.muted }}>{counts[key]}</span>
-              </button>
-            );
-          })}
+        <div className="segmented" role="group" aria-label="Filter trades">
+          {FILTERS.map(({ key, label }) => (
+            <button key={key} aria-pressed={active === key} onClick={() => setFilter(key)}>
+              {label}
+              <span className={`count${key === "action" && counts.action > 0 ? " count-hot" : ""}`}>{counts[key]}</span>
+            </button>
+          ))}
         </div>
       }
     >
-      {visible.length === 0 && (
-        <div style={{ color: colors.faint, textAlign: "center", padding: "20px 0", fontSize: 13 }}>
-          {filter === "action" ? "Nothing needs your action right now." : "No trades here yet."}
+      {error && <div style={{ padding: "14px 16px 0" }}><Notice tone="error">Can&apos;t reach the network right now. Retrying…</Notice></div>}
+      {isLoading && (
+        <div className="stack-sm" style={{ padding: 16 }}>
+          <div className="skeleton" style={{ width: "70%" }} />
+          <div className="skeleton" style={{ width: "50%" }} />
         </div>
       )}
-      <div style={{ display: "grid", gap: 6 }}>
-        {visible.map(({ t, step, r }) => {
-          const selected = selectedId === t.tradeId;
-          return (
-            <button key={t.tradeId.toString()} onClick={() => onSelect(t.tradeId)} style={{
-              display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", width: "100%", textAlign: "left", cursor: "pointer",
-              padding: "11px 14px", borderRadius: 10, color: colors.text,
-              background: selected ? "#0f1f3a" : "#060d1a",
-              border: `1px solid ${selected ? colors.blue : step.mine ? "#f59e0b50" : "#0f172a"}`,
-            }}>
-              <div style={{ width: 104, flexShrink: 0 }}><StateBadge state={t.state} compact /></div>
-              <div style={{ flex: "1 1 170px", minWidth: 0 }}>
-                <div style={{ fontFamily: mono, fontSize: 12, color: "#94a3b8" }}>
-                  Trade #{t.tradeId.toString()}
-                  {(r.isBuyer || r.isSeller) && <span style={{ marginLeft: 8, fontSize: 9, padding: "1px 6px", borderRadius: 8, background: "#1e3a5f", color: colors.blueText }}>YOU · {r.isBuyer ? "BUYER" : "SELLER"}</span>}
-                </div>
-                <div style={{ fontSize: 11, color: colors.muted, marginTop: 3 }}>
-                  {shortAddr(t.seller)} → {shortAddr(t.buyer)}{t.openedAt ? ` · ${fmtAgo(t.openedAt, chainNow)}` : ""}
-                </div>
+      {!isLoading && visible.length === 0 && (
+        active === "action" ? (
+          <Empty title="Nothing waiting on you">You&apos;re all caught up.</Empty>
+        ) : (
+          <Empty title="No trades yet" action={<button className="btn btn-sm" onClick={onBrowse}>Browse the market</button>}>
+            Trades appear here as soon as you buy from an offer or someone buys from yours.
+          </Empty>
+        )
+      )}
+      <div className="trade-list">
+        {visible.map(({ t, step, r }) => (
+          <button key={t.tradeId.toString()} className="trade-row" aria-current={selectedId === t.tradeId} onClick={() => onSelect(t.tradeId)}>
+            <div className="stack-xs" style={{ minWidth: 0 }}>
+              <div className="row" style={{ gap: 8 }}>
+                <span className="mono strong">#{t.tradeId.toString()}</span>
+                <StateBadge state={t.state} />
+                {(r.isBuyer || r.isSeller) && <span className="chip">{r.isBuyer ? "buying" : "selling"}</span>}
               </div>
-              <div style={{ minWidth: 90, textAlign: "right" }}>
-                <strong style={{ fontSize: 15 }}>{fmtToken(t.amount)}</strong> <span style={{ fontSize: 11, color: colors.muted }}>USDT</span>
-              </div>
-              <div style={{ flex: "1 1 170px", textAlign: "right", fontSize: 12, fontWeight: step.mine ? 700 : 500, color: step.mine ? colors.amberText : step.tone === "done" ? colors.faint : "#64748b" }}>
-                {step.mine ? "● " : ""}{step.label}
-              </div>
-            </button>
-          );
-        })}
+              <span className="tiny faint mono">
+                {r.isBuyer ? `from ${shortAddr(t.seller)}` : r.isSeller ? `to ${shortAddr(t.buyer)}` : `${shortAddr(t.seller)} → ${shortAddr(t.buyer)}`}
+                {t.openedAt ? ` · ${fmtAgo(t.openedAt, chainNow)}` : ""}
+              </span>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <span className="mono strong">{fmtToken(t.amount)}</span> <span className="tiny faint">{V4.tokenSymbol}</span>
+            </div>
+            <div className={`next${step.mine ? " mine" : ""}`}>
+              {step.mine ? "→" : step.tone === "done" ? "✓" : "…"} {step.label}
+            </div>
+          </button>
+        ))}
       </div>
     </Card>
   );

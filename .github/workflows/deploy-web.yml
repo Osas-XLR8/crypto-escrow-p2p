@@ -1,0 +1,101 @@
+name: Deploy web app
+
+# Builds the static web app against the public testnet deployment in
+# packages/contracts/deployments/v4-<chain>.json and publishes it to GitHub Pages.
+# One-time setup: repo Settings → Pages → Source: "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/contracts/my-rainbowkit-app/**"
+      - "packages/sdk/**"
+      - "packages/contracts/deployments/**"
+      - ".github/workflows/deploy-web.yml"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  CHAIN_ID: "84532" # Base Sepolia
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      found: ${{ steps.deployment.outputs.found }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Check for a testnet deployment
+        id: deployment
+        run: |
+          if [ -f "packages/contracts/deployments/v4-${CHAIN_ID}.json" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No packages/contracts/deployments/v4-${CHAIN_ID}.json yet — run packages/contracts/deploy-testnet.sh and commit it."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.deployment.outputs.found == 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            packages/sdk/package-lock.json
+            packages/contracts/my-rainbowkit-app/package-lock.json
+
+      - name: Build SDK
+        if: steps.deployment.outputs.found == 'true'
+        working-directory: packages/sdk
+        run: |
+          npm ci
+          npm run build
+
+      - name: Configure Pages
+        if: steps.deployment.outputs.found == 'true'
+        id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Build static site
+        if: steps.deployment.outputs.found == 'true'
+        working-directory: packages/contracts/my-rainbowkit-app
+        env:
+          NEXT_PUBLIC_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+          # Optional repo variables (Settings → Secrets and variables → Actions → Variables).
+          NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: ${{ vars.WALLETCONNECT_PROJECT_ID }}
+          NEXT_PUBLIC_RPC_URL: ${{ vars.TESTNET_RPC_URL }}
+          NEXT_PUBLIC_NOSTR_RELAYS: ${{ vars.NOSTR_RELAYS }}
+        run: |
+          npm ci
+          npm run sync:v4 -- "$CHAIN_ID"
+          npm run build
+          touch out/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.deployment.outputs.found == 'true'
+        with:
+          path: packages/contracts/my-rainbowkit-app/out
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.found == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

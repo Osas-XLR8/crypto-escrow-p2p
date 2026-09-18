@@ -6,8 +6,16 @@ const appModules = path.join(__dirname, 'node_modules');
 // Real path of the linked @escrowx/sdk package (webpack resolves the symlink to this location).
 const sdkDir = fs.realpathSync(path.join(appModules, '@escrowx/sdk'));
 
+// Static site: no server, so any free static host works (GitHub Pages, Netlify, Cloudflare Pages, Vercel).
+// NEXT_PUBLIC_BASE_PATH is set when served from a sub-path, e.g. /crypto-escrow-p2p on GitHub Pages.
+const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
+
 const nextConfig = {
   reactStrictMode: true,
+  output: 'export',
+  trailingSlash: true,
+  images: { unoptimized: true },
+  basePath,
   webpack: (config) => {
     config.externals.push('pino-pretty', 'lokijs', 'encoding');
     // For files inside the linked SDK only: resolve bare imports (viem, nostr-tools) from this app's

@@ -1,104 +1,147 @@
-// src/components/ui.tsx — small shared building blocks matching the app's dark style.
+// src/components/ui.tsx — shared building blocks. Styling lives in src/styles/app.css.
 
-import type { CSSProperties, ReactNode } from "react";
+import { useState, type ReactNode } from "react";
+import { explorerAddress, explorerTx } from "@/config/v4";
 
-export const colors = {
-  page: "#060d1a",
-  card: "#0a1628",
-  inset: "#060d1a",
-  border: "#1e293b",
-  faint: "#334155",
-  muted: "#475569",
-  text: "#e2e8f0",
-  strong: "#f1f5f9",
-  green: "#10b981",
-  greenText: "#34d399",
-  blue: "#3b82f6",
-  blueText: "#60a5fa",
-  amber: "#f59e0b",
-  amberText: "#fbbf24",
-  red: "#ef4444",
-  redText: "#f87171",
-} as const;
-
-export const mono = "'IBM Plex Mono', monospace";
-export const sans = "'IBM Plex Sans', sans-serif";
-
-export const inputStyle: CSSProperties = {
-  width: "100%", padding: "10px 12px", fontSize: 13, borderRadius: 8,
-  border: `1px solid ${colors.border}`, background: "#0f172a", color: colors.text,
-  outline: "none", boxSizing: "border-box", fontFamily: sans,
-};
-
-export function Card({ title, right, children, style }: { title?: ReactNode; right?: ReactNode; children: ReactNode; style?: CSSProperties }) {
+export function Card({ title, sub, right, children, flush = false, className = "" }: {
+  title?: ReactNode;
+  sub?: ReactNode;
+  right?: ReactNode;
+  children: ReactNode;
+  /** No inner padding (for lists that draw their own rows). */
+  flush?: boolean;
+  className?: string;
+}) {
   return (
-    <section style={{ background: colors.card, border: `1px solid ${colors.border}`, borderRadius: 12, padding: 20, ...style }}>
+    <section className={`card ${className}`}>
       {(title || right) && (
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
-          {title && <h2 style={{ fontSize: 11, color: colors.faint, letterSpacing: "0.12em", fontWeight: 600, margin: 0 }}>{title}</h2>}
+        <header className="card-head">
+          <div>
+            {title && <h2 className="card-title">{title}</h2>}
+            {sub && <p className="card-sub">{sub}</p>}
+          </div>
           {right}
-        </div>
+        </header>
       )}
-      {children}
+      {flush ? children : <div className="card-body">{children}</div>}
     </section>
   );
 }
 
-export function Label({ children, hint }: { children: ReactNode; hint?: ReactNode }) {
+export function Field({ label, hint, children, help }: { label: ReactNode; hint?: ReactNode; children: ReactNode; help?: ReactNode }) {
   return (
-    <span style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#64748b", letterSpacing: "0.06em", marginBottom: 6 }}>
+    <label className="field">
+      <span className="field-label">
+        <span>{label}</span>
+        {hint && <span className="hint">{hint}</span>}
+      </span>
       {children}
-      {hint && <span style={{ color: colors.faint, fontWeight: 400, marginLeft: 6 }}>{hint}</span>}
-    </span>
+      {help && <p className="help">{help}</p>}
+    </label>
   );
 }
 
-export function FieldRow({ label, value }: { label: string; value: ReactNode }) {
+export function KV({ rows }: { rows: [ReactNode, ReactNode][] }) {
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderBottom: "1px solid #0f172a", gap: 16, flexWrap: "wrap" }}>
-      <span style={{ color: colors.muted, fontSize: 11, fontWeight: 600, letterSpacing: "0.08em" }}>{label}</span>
-      <span style={{ color: colors.text, fontSize: 13, textAlign: "right", wordBreak: "break-all" }}>{value}</span>
-    </div>
+    <dl className="kv inset">
+      {rows.map(([k, v], i) => (
+        <div key={i}>
+          <dt>{k}</dt>
+          <dd>{v}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
-type Variant = "primary" | "danger" | "warning" | "ghost" | "blue";
-const palette: Record<Variant, string> = { primary: colors.green, danger: colors.red, warning: colors.amber, ghost: colors.muted, blue: colors.blue };
+type Variant = "default" | "primary" | "accent" | "danger" | "warn" | "ghost";
 
-export function Button({ children, onClick, disabled, variant = "ghost", title, type = "button", solid = false }: {
-  children: ReactNode; onClick?: () => void; disabled?: boolean; variant?: Variant; title?: string; type?: "button" | "submit"; solid?: boolean;
+export function Button({ children, onClick, disabled, variant = "default", title, size, block, busy, type = "button" }: {
+  children: ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+  variant?: Variant;
+  title?: string;
+  size?: "sm";
+  block?: boolean;
+  /** Shows a spinner and disables the button. */
+  busy?: boolean;
+  type?: "button" | "submit";
 }) {
-  const c = palette[variant];
+  const cls = ["btn", variant !== "default" && `btn-${variant}`, size && `btn-${size}`, block && "btn-block"].filter(Boolean).join(" ");
   return (
-    <button
-      type={type}
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      style={{
-        padding: "9px 16px", borderRadius: 10, fontSize: 13, fontWeight: 600, fontFamily: sans,
-        background: disabled ? "#0f172a" : solid ? c : `${c}18`,
-        border: `1.5px solid ${disabled ? colors.border : c}`,
-        color: disabled ? "#2d3f55" : solid ? "#fff" : c,
-        cursor: disabled ? "not-allowed" : "pointer", whiteSpace: "nowrap",
-      }}
-    >
+    <button type={type} className={cls} onClick={onClick} disabled={disabled || busy} title={title} aria-busy={busy || undefined}>
+      {busy && <span className="spinner" aria-hidden />}
       {children}
     </button>
   );
 }
 
+const NOTICE_ICON = { info: "i", ok: "✓", warn: "!", error: "×" } as const;
+
 export function Notice({ tone = "info", children }: { tone?: "info" | "warn" | "error" | "ok"; children: ReactNode }) {
-  const t = {
-    info: { bg: "#0f1f3a", border: "#1e3a5f", color: "#93c5fd" },
-    warn: { bg: "#3d2e00", border: "#f59e0b60", color: colors.amberText },
-    error: { bg: "#1a0808", border: "#3f0f0f", color: colors.redText },
-    ok: { bg: "#052e16", border: "#10b98160", color: colors.greenText },
-  }[tone];
   return (
-    <div style={{ padding: "11px 14px", borderRadius: 10, background: t.bg, border: `1px solid ${t.border}`, color: t.color, fontSize: 13, lineHeight: 1.5 }}>
-      {children}
+    <div className={`notice notice-${tone}`} role={tone === "error" ? "alert" : "status"}>
+      <span className="notice-icon" aria-hidden>{NOTICE_ICON[tone]}</span>
+      <div>{children}</div>
     </div>
+  );
+}
+
+export function Chip({ children, tone, title }: { children: ReactNode; tone?: "accent" | "warn" | "danger" | "info"; title?: string }) {
+  return <span className={`chip${tone ? ` chip-${tone}` : ""}`} title={title}>{children}</span>;
+}
+
+export function Empty({ title, children, action }: { title: string; children?: ReactNode; action?: ReactNode }) {
+  return (
+    <div className="empty">
+      <div className="empty-title">{title}</div>
+      {children && <div>{children}</div>}
+      {action}
+    </div>
+  );
+}
+
+export function CopyButton({ value, label = "Copy" }: { value: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="icon-btn"
+      title={copied ? "Copied" : label}
+      aria-label={label}
+      onClick={() => {
+        void navigator.clipboard?.writeText(value).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1200);
+        });
+      }}
+    >
+      {copied ? "✓" : "⧉"}
+    </button>
+  );
+}
+
+/** Shortened address with copy + explorer link. */
+export function Addr({ address, you, full = false }: { address: string; you?: boolean; full?: boolean }) {
+  const href = explorerAddress(address);
+  return (
+    <span className="addr">
+      <span title={address}>{full ? address : `${address.slice(0, 6)}…${address.slice(-4)}`}</span>
+      {you && <span className="chip" style={{ marginLeft: 4 }}>you</span>}
+      <CopyButton value={address} label="Copy address" />
+      {href && <a className="icon-btn" href={href} target="_blank" rel="noreferrer" title="View on explorer" aria-label="View on explorer">↗</a>}
+    </span>
+  );
+}
+
+export function TxLink({ hash }: { hash: string }) {
+  const href = explorerTx(hash);
+  const short = `${hash.slice(0, 8)}…${hash.slice(-6)}`;
+  return href ? (
+    <a className="mono" href={href} target="_blank" rel="noreferrer" title={hash}>{short} ↗</a>
+  ) : (
+    <code title={hash}>{short}</code>
   );
 }
 
@@ -106,6 +149,9 @@ export function Notice({ tone = "info", children }: { tone?: "info" | "warn" | "
 export function errorText(e: unknown): string {
   const err = e as { shortMessage?: string; message?: string; cause?: { reason?: string } };
   const reason = err?.cause?.reason;
-  const text = reason ? `Contract rejected: ${reason}` : err?.shortMessage ?? err?.message ?? String(e);
-  return text.split("\n")[0]!.slice(0, 220);
+  const raw = reason ? `Contract rejected: ${reason}` : err?.shortMessage ?? err?.message ?? String(e);
+  const text = raw.split("\n")[0]!;
+  if (/user (rejected|denied)/i.test(text)) return "You cancelled the request in your wallet.";
+  if (/insufficient funds/i.test(text)) return "Not enough ETH for gas on this network. Get some from a faucet and try again.";
+  return text.slice(0, 220);
 }

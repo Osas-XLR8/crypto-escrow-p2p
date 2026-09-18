@@ -211,13 +211,17 @@ Important UI rule:
 - v4 redesign underway on branches (see git log): EscrowCoreV4 (no platform control over funds),
   loser-pays arbitration + fallback arbitrator + licensed-firm adapter, @escrowx/sdk, and the web app
   migrated to v4 (Market / Sell / Trades, relay offer book, encrypted chat, sealed evidence)
+- Web app redesigned (light/dark design system, onboarding checklist, fiat amounts on trades) and made
+  network-agnostic: static export, chunked log scanning, TestUSDT faucet token, `deploy-testnet.sh` for
+  Base Sepolia, and a GitHub Pages workflow (`.github/workflows/deploy-web.yml`)
 
 ---
 
 ## 11) Next steps (what we should build next)
 
 ### Product
-- Scale trade indexing beyond a single getLogs call (chunked ranges or a backend indexer) for real networks
+- Trade indexing now scans in chunks from the deploy block; past a few hundred thousand blocks a shared
+  indexer (or a persisted client cache) will be needed for fast first loads
 - Clearer UX: tx explorer links, per-role guided flows
 
 ### Backend for marketplace demo

@@ -1,4 +1,4 @@
-// src/components/v4/MessagingGate.tsx — asks for the one signature that unlocks encrypted messaging.
+// src/components/v4/MessagingGate.tsx — asks for the signatures that unlock encrypted messaging.
 
 import type { ReactNode } from "react";
 import { useEscrowX } from "@/context/EscrowX";
@@ -8,17 +8,24 @@ export function MessagingGate({ children, reason }: { children: ReactNode; reaso
   const { identity, unlockMessaging, unlocking, unlockError, address } = useEscrowX();
   if (identity) return <>{children}</>;
   return (
-    <div style={{ display: "grid", gap: 10 }}>
-      <Notice tone="info">
-        <strong>Unlock encrypted messaging</strong> to {reason}. Your wallet signs two free messages: one derives your
-        private chat key (kept only in this tab), one publicly links that key to your wallet. Neither moves funds.
-      </Notice>
-      {unlockError && <Notice tone="error">{unlockError}</Notice>}
-      <div>
-        <Button variant="blue" solid onClick={() => void unlockMessaging()} disabled={!address || unlocking}>
-          {unlocking ? "Waiting for signatures…" : "Unlock messaging"}
-        </Button>
+    <div className="stack-sm">
+      <div className="inset" style={{ padding: 16 }}>
+        <div className="stack-sm">
+          <div className="row">
+            <span className="chip chip-info">🔒 Encrypted messaging</span>
+          </div>
+          <p className="p0 small muted">
+            Unlock to {reason}. Your wallet signs two free messages — one creates your private chat key (kept only in this
+            tab), one links that key to your wallet so the other side can verify it&apos;s you. <strong>Neither moves funds or costs gas.</strong>
+          </p>
+          <div>
+            <Button variant="primary" onClick={() => void unlockMessaging()} disabled={!address} busy={unlocking}>
+              {unlocking ? "Waiting for signatures…" : "Unlock messaging"}
+            </Button>
+          </div>
+        </div>
       </div>
+      {unlockError && <Notice tone="error">{unlockError}</Notice>}
     </div>
   );
 }

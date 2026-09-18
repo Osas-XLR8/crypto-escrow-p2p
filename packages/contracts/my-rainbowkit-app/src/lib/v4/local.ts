@@ -50,6 +50,43 @@ export async function findSellerKey(book: OfferBook, seller: Address): Promise<s
   return null;
 }
 
+// ─── Offer terms behind a trade (price + currency live off-chain, in the signed offer) ──
+
+export interface TradeTerms {
+  price: string;
+  fiatCurrency: string;
+  paymentMethods: string[];
+}
+
+export function rememberTradeTerms(tradeId: bigint, terms: TradeTerms) {
+  set(`escrowx:terms:${scope}:${tradeId}`, JSON.stringify(terms));
+}
+
+export function recallTradeTerms(tradeId: bigint): TradeTerms | null {
+  try {
+    const t = JSON.parse(get(`escrowx:terms:${scope}:${tradeId}`) ?? "null") as TradeTerms | null;
+    return t && /^\d+(\.\d+)?$/.test(t.price) && typeof t.fiatCurrency === "string" ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Finds the terms of the seller's signed offer a trade was opened from (matched by offer hash). */
+export async function findTradeTerms(book: OfferBook, seller: Address, offerHash: string): Promise<TradeTerms | null> {
+  const events = await book.pool.querySync(book.relays, book.filter({ chainId: CHAIN_ID }), { maxWait: 3000 });
+  for (const event of events) {
+    try {
+      const parsed = await parseOfferEvent(event, { chainId: CHAIN_ID, escrow: V4.escrow, now: null });
+      if (parsed.offerHash.toLowerCase() === offerHash.toLowerCase() && parsed.offer.seller.toLowerCase() === seller.toLowerCase()) {
+        return { price: parsed.terms.price, fiatCurrency: parsed.terms.fiatCurrency, paymentMethods: parsed.terms.paymentMethods };
+      }
+    } catch {
+      /* ignore invalid events */
+    }
+  }
+  return null;
+}
+
 // ─── Buyer's encrypted payment evidence (kept on this device) ─────────────────
 
 export interface StoredEvidence {
@@ -113,7 +150,7 @@ export function fmtToken(raw: bigint): string {
 export function fmtFiat(raw: bigint, price: string, currency: string): string {
   const value = Number(formatUnits(raw, V4.tokenDecimals)) * Number(price);
   try {
-    return value.toLocaleString("en-US", { style: "currency", currency, maximumFractionDigits: 2 });
+    return value.toLocaleString("en-US", { style: "currency", currency, currencyDisplay: "narrowSymbol", minimumFractionDigits: 0, maximumFractionDigits: 2 });
   } catch {
     return `${value.toFixed(2)} ${currency}`;
   }

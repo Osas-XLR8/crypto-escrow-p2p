@@ -19,14 +19,16 @@ import {
   sealEvidenceKey,
 } from "@escrowx/sdk";
 import { useEscrowX } from "@/context/EscrowX";
-import { arbitratorName } from "@/config/v4";
+import { V4, arbitratorName } from "@/config/v4";
 import { StateBadge } from "@/components/StateBadge";
-import { Button, Card, FieldRow, Label, Notice, colors, errorText, mono } from "@/components/ui";
+import { Addr, Button, Card, Field, KV, Notice, TxLink, errorText } from "@/components/ui";
 import { MessagingGate } from "@/components/v4/MessagingGate";
 import { TradeChatPanel } from "@/components/v4/TradeChatPanel";
 import { fmtDuration, fmtTs, shortAddr, shortHash } from "@/lib/format";
-import { downloadBytes, fmtToken, loadEvidence, storeEvidence } from "@/lib/v4/local";
+import { downloadBytes, findTradeTerms, fmtFiat, fmtToken, loadEvidence, recallTradeTerms, rememberTradeTerms, storeEvidence } from "@/lib/v4/local";
 import { CANCEL_REASONS, RELEASE_REASONS, type TradeSummary } from "@/lib/v4/tradeIndex";
+
+const SYM = V4.tokenSymbol;
 
 export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }: {
   summary: TradeSummary;
@@ -34,19 +36,36 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   arbitrationTimeout: number;
   onChanged: () => void;
 }) {
-  const { address, client } = useEscrowX();
+  const { address, client, book, identity } = useEscrowX();
   const publicClient = usePublicClient();
   const id = summary.tradeId;
+  const opened = summary.events.find((e) => e.name === "TradeOpened");
+
+  // Price and currency live in the seller's signed offer, not on-chain: remembered at purchase, else looked up on relays.
+  const terms = useQuery({
+    queryKey: ["tradeTerms", id.toString()],
+    enabled: !!book && !!opened,
+    staleTime: Infinity,
+    queryFn: async () => {
+      const known = recallTradeTerms(id);
+      if (known) return known;
+      const found = await findTradeTerms(book!, summary.seller as Address, opened!.args.offerHash as string);
+      if (found) rememberTradeTerms(id, found);
+      return found;
+    },
+  });
 
   const chain = useQuery({
     queryKey: ["trade", id.toString(), client?.escrow],
     enabled: !!client,
-    refetchInterval: 4000,
+    refetchInterval: 5000,
     queryFn: async () => {
       const [trade, dispute] = await Promise.all([client!.getTrade(id), client!.getDispute(id)]);
-      const primaryFee = await client!.arbitrationCost(trade.arbitrator);
-      const fallbackFee = await client!.arbitrationCost(trade.fallbackArbitrator);
-      const claimable = address ? await client!.claimableNative(address) : 0n;
+      const [primaryFee, fallbackFee, claimable] = await Promise.all([
+        client!.arbitrationCost(trade.arbitrator),
+        client!.arbitrationCost(trade.fallbackArbitrator),
+        address ? client!.claimableNative(address) : Promise.resolve(0n),
+      ]);
       let assignee: Address = zeroAddress;
       let panelistKey: string | null = null;
       if (trade.state === TradeState.DISPUTED && publicClient) {
@@ -85,7 +104,18 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   }
 
   if (!chain.data || !client) {
-    return <Card title={`TRADE #${id}`}><div style={{ color: colors.faint, fontSize: 13 }}>{chain.error ? errorText(chain.error) : "Loading trade from chain…"}</div></Card>;
+    return (
+      <Card title={`Trade #${id}`}>
+        {chain.error ? (
+          <Notice tone="error">{errorText(chain.error)}</Notice>
+        ) : (
+          <div className="stack-sm">
+            <div className="skeleton" style={{ width: "30%" }} />
+            <div className="skeleton" style={{ width: "80%" }} />
+          </div>
+        )}
+      </Card>
+    );
   }
 
   const { trade: t, dispute: d, primaryFee, fallbackFee, claimable, assignee, panelistKey } = chain.data;
@@ -95,6 +125,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   const isParty = isSeller || isBuyer;
   const now = chainNow;
   const open = t.state === TradeState.LOCKED || t.state === TradeState.PAID || t.state === TradeState.FEE_PENDING || t.state === TradeState.DISPUTED;
+  const disputed = t.state === TradeState.DISPUTED || t.state === TradeState.FEE_PENDING;
 
   const paymentDeadline = Number(t.paymentDeadline);
   const releaseDeadline = Number(t.releaseDeadline);
@@ -104,7 +135,9 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   const terminalAt = startedAt + (d.escalated ? arbitrationTimeout : 2 * arbitrationTimeout);
   const openerIsMe = me === d.opener.toLowerCase();
 
-  const countdown = (deadline: number) => (now <= deadline ? `in ${fmtDuration(deadline - now)}` : `passed ${fmtDuration(now - deadline)} ago`);
+  const fiat = terms.data ? fmtFiat(t.amount, terms.data.price, terms.data.fiatCurrency) : null;
+
+  const countdown = (deadline: number) => (now <= deadline ? `in ${fmtDuration(deadline - now)}` : `${fmtDuration(now - deadline)} ago`);
 
   async function markPaid() {
     let commitment: Hex = zeroHash;
@@ -123,43 +156,50 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
 
   if (isBuyer && t.state === TradeState.LOCKED && now <= paymentDeadline) {
     actions.push(
-      <ActionBox key="paid" title="I've sent the fiat payment">
-        <Label hint="optional but strongly recommended">RECEIPT OR BANK STATEMENT</Label>
-        <input type="file" accept="image/*,application/pdf" onChange={(e) => setReceipt(e.target.files?.[0] ?? null)} style={{ color: "#94a3b8", fontSize: 12 }} />
-        <p style={{ fontSize: 12, color: colors.muted, margin: "6px 0 10px" }}>
-          The file is encrypted on this device. Only its fingerprint goes on-chain; nobody can read it unless you later share the key with the dispute arbitrator.
-        </p>
-        <Button variant="primary" solid disabled={!!busy} onClick={() => run("paid", markPaid, "Marked as paid. The seller now checks their bank and releases.")}>
-          {busy === "paid" ? "Confirm in wallet…" : "Mark as paid"}
-        </Button>
+      <ActionBox key="paid" title={fiat ? `Send ${fiat} to the seller, then confirm here` : "Pay the seller, then confirm here"} note={`Due ${countdown(paymentDeadline)}. The seller's details are in the private chat below.`}>
+        <Field label="Receipt or bank statement" hint="optional, strongly recommended"
+          help="Encrypted on this device. Only its fingerprint goes on-chain; nobody can open it unless you share the key with a dispute arbitrator.">
+          <input className="file" type="file" accept="image/*,application/pdf" onChange={(e) => setReceipt(e.target.files?.[0] ?? null)} />
+        </Field>
+        <div>
+          <Button variant="accent" busy={busy === "paid"} disabled={!!busy} onClick={() => run("paid", markPaid, "Marked as paid. The seller now checks their bank and releases.")}>
+            {busy === "paid" ? "Confirm in wallet…" : "I've paid"}
+          </Button>
+        </div>
       </ActionBox>
     );
   }
 
   if (isSeller && open) {
     actions.push(
-      <ActionBox key="release" title={t.state === TradeState.DISPUTED || t.state === TradeState.FEE_PENDING ? "Release now (concedes the dispute)" : "Release crypto to the buyer"}>
-        <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: colors.text, marginBottom: 10 }}>
-          <input type="checkbox" checked={confirmedFiat} onChange={(e) => setConfirmedFiat(e.target.checked)} style={{ marginTop: 3 }} />
-          <span>I checked <strong>my own banking app</strong> and the full amount arrived from an account in the buyer&apos;s name. (Screenshots can be faked.)</span>
+      <ActionBox key="release"
+        title={disputed ? "Release now (concedes the dispute)" : t.state === TradeState.PAID ? "Buyer says they've paid — check, then release" : "Release to the buyer"}
+        note={t.state === TradeState.LOCKED ? "The buyer hasn't marked this as paid yet. Only release once the money is in your account." : undefined}>
+        <label className="check">
+          <input type="checkbox" checked={confirmedFiat} onChange={(e) => setConfirmedFiat(e.target.checked)} />
+          <span>I checked <strong>my own banking app</strong> and the full amount{fiat ? <> (<strong className="mono">{fiat}</strong>)</> : null} arrived from an account in the buyer&apos;s name. <span className="faint">Screenshots can be faked.</span></span>
         </label>
-        <Button variant="primary" solid disabled={!confirmedFiat || !!busy} onClick={() => run("release", () => client.release(id), `Released ${fmtToken(t.amount)} USDT to the buyer.`)}>
-          {busy === "release" ? "Confirm in wallet…" : `Release ${fmtToken(t.amount)} USDT`}
-        </Button>
+        <div>
+          <Button variant="accent" disabled={!confirmedFiat || !!busy} busy={busy === "release"} onClick={() => run("release", () => client.release(id), `Released ${fmtToken(t.amount)} ${SYM} to the buyer.`)}>
+            {busy === "release" ? "Confirm in wallet…" : `Release ${fmtToken(t.amount)} ${SYM}`}
+          </Button>
+        </div>
       </ActionBox>
     );
   }
 
   if (t.state === TradeState.PAID && (isSeller || (isBuyer && now > releaseDeadline))) {
     actions.push(
-      <ActionBox key="dispute" title={isSeller ? "Payment didn't arrive? Open a dispute" : "Seller hasn't released — open a dispute"}>
-        <p style={{ fontSize: 12, color: colors.muted, margin: "0 0 10px" }}>
-          Deposit the arbitration fee ({formatEther(primaryFee)} ETH). The other party has to match it or loses by default. The winner gets their fee back.
-          Arbitrator: <strong>{arbitratorName(t.arbitrator)}</strong>.
+      <ActionBox key="dispute" title={isSeller ? "Money didn't arrive? Open a dispute" : "Seller hasn't released — open a dispute"}>
+        <p className="small muted">
+          You deposit the arbitration fee (<span className="mono">{formatEther(primaryFee)} ETH</span>). The other side must match it or loses by default.
+          The winner gets their fee back. Decided by <strong>{arbitratorName(t.arbitrator)}</strong>.
         </p>
-        <Button variant="warning" disabled={!!busy} onClick={() => run("dispute", () => client.openDispute(id), "Dispute opened. Waiting for the other party's fee.")}>
-          {busy === "dispute" ? "Confirm in wallet…" : "Open dispute"}
-        </Button>
+        <div>
+          <Button variant="warn" busy={busy === "dispute"} disabled={!!busy} onClick={() => run("dispute", () => client.openDispute(id), "Dispute opened. Waiting for the other party's fee.")}>
+            Open dispute
+          </Button>
+        </div>
       </ActionBox>
     );
   }
@@ -168,21 +208,26 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
     if (isParty && !openerIsMe && now <= feeDeadline) {
       actions.push(
         <ActionBox key="fee" title="A dispute was opened against you">
-          <p style={{ fontSize: 12, color: colors.muted, margin: "0 0 10px" }}>
-            Match the {formatEther(primaryFee)} ETH arbitration fee {countdown(feeDeadline)}, or the other party wins by default. If you win, it&apos;s refunded.
+          <p className="small muted">
+            Match the <span className="mono">{formatEther(primaryFee)} ETH</span> arbitration fee {countdown(feeDeadline)}, or the other side wins by default. If you win, it&apos;s refunded.
           </p>
-          <Button variant="warning" solid disabled={!!busy} onClick={() => run("fee", () => client.payArbitrationFee(id), "Fee matched — the dispute is now with the arbitrator.")}>
-            {busy === "fee" ? "Confirm in wallet…" : "Match fee & defend"}
-          </Button>
+          <div>
+            <Button variant="primary" busy={busy === "fee"} disabled={!!busy} onClick={() => run("fee", () => client.payArbitrationFee(id), "Fee matched — the dispute is now with the arbitrator.")}>
+              Match fee &amp; defend
+            </Button>
+          </div>
         </ActionBox>
       );
     }
     if (now > feeDeadline) {
       actions.push(
         <ActionBox key="feeTimeout" title="Fee deadline passed">
-          <Button variant="primary" disabled={!!busy} onClick={() => run("feeTimeout", () => client.claimFeeTimeout(id), "Dispute settled in the opener's favour.")}>
-            {busy === "feeTimeout" ? "Confirm in wallet…" : "Settle by default"}
-          </Button>
+          <p className="small muted">The other side didn&apos;t match the fee in time. Anyone can now settle it in the opener&apos;s favour.</p>
+          <div>
+            <Button variant="primary" busy={busy === "feeTimeout"} disabled={!!busy} onClick={() => run("feeTimeout", () => client.claimFeeTimeout(id), "Dispute settled in the opener's favour.")}>
+              Settle by default
+            </Button>
+          </div>
         </ActionBox>
       );
     }
@@ -191,10 +236,12 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   if (t.state === TradeState.DISPUTED && isParty && !d.escalated && now > escalateAt) {
     actions.push(
       <ActionBox key="escalate" title="Arbitrator missed its deadline">
-        <p style={{ fontSize: 12, color: colors.muted, margin: "0 0 10px" }}>Move the case to <strong>{arbitratorName(t.fallbackArbitrator)}</strong> (fee {formatEther(fallbackFee)} ETH, paid from the held fees where possible).</p>
-        <Button variant="warning" disabled={!!busy} onClick={() => run("escalate", () => client.escalateToFallback(id), "Escalated to the fallback arbitrator.")}>
-          {busy === "escalate" ? "Confirm in wallet…" : "Escalate"}
-        </Button>
+        <p className="small muted">Move the case to <strong>{arbitratorName(t.fallbackArbitrator)}</strong> (fee <span className="mono">{formatEther(fallbackFee)} ETH</span>, paid from the held fees where possible).</p>
+        <div>
+          <Button variant="warn" busy={busy === "escalate"} disabled={!!busy} onClick={() => run("escalate", () => client.escalateToFallback(id), "Escalated to the fallback arbitrator.")}>
+            Escalate
+          </Button>
+        </div>
       </ActionBox>
     );
   }
@@ -202,82 +249,177 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   if (t.state === TradeState.DISPUTED && now > terminalAt) {
     actions.push(
       <ActionBox key="terminal" title="Arbitration timed out">
-        <p style={{ fontSize: 12, color: colors.muted, margin: "0 0 10px" }}>Nobody ruled in time. Closing returns the crypto to the seller&apos;s vault and splits the held fees.</p>
-        <Button disabled={!!busy} onClick={() => run("terminal", () => client.claimArbitrationTimeout(id), "Dispute closed.")}>
-          {busy === "terminal" ? "Confirm in wallet…" : "Close dispute"}
-        </Button>
+        <p className="small muted">Nobody ruled in time. Closing returns the crypto to the seller&apos;s vault and splits the held fees.</p>
+        <div>
+          <Button busy={busy === "terminal"} disabled={!!busy} onClick={() => run("terminal", () => client.claimArbitrationTimeout(id), "Dispute closed.")}>
+            Close dispute
+          </Button>
+        </div>
       </ActionBox>
     );
   }
 
   if (t.state === TradeState.LOCKED && now > paymentDeadline) {
     actions.push(
-      <ActionBox key="unpaid" title="Payment window missed">
-        <Button disabled={!!busy} onClick={() => run("unpaid", () => client.cancelUnpaid(id), "Trade cancelled; crypto is back in the seller's vault.")}>
-          {busy === "unpaid" ? "Confirm in wallet…" : "Cancel trade"}
-        </Button>
+      <ActionBox key="unpaid" title="Payment window missed" note={`The buyer didn't mark this as paid in time. Anyone can now return the ${SYM} to the seller's vault.`}>
+        <div>
+          <Button variant="primary" busy={busy === "unpaid"} disabled={!!busy} onClick={() => run("unpaid", () => client.cancelUnpaid(id), "Trade cancelled; crypto is back in the seller's vault.")}>
+            Cancel trade
+          </Button>
+        </div>
       </ActionBox>
     );
   }
 
   if (isBuyer && open) {
     actions.push(
-      <ActionBox key="cancel" title={t.state === TradeState.DISPUTED || t.state === TradeState.FEE_PENDING ? "Withdraw from the trade (concedes the dispute)" : "Changed your mind?"}>
-        <p style={{ fontSize: 12, color: colors.muted, margin: "0 0 10px" }}>Cancelling returns the crypto to the seller. Don&apos;t cancel if you already paid — open a dispute instead.</p>
-        <Button variant="danger" disabled={!!busy} onClick={() => run("cancel", () => client.buyerCancel(id), "Trade cancelled.")}>
-          {busy === "cancel" ? "Confirm in wallet…" : "Cancel trade"}
-        </Button>
+      <ActionBox key="cancel" title={disputed ? "Withdraw from the trade (concedes the dispute)" : "Changed your mind?"}>
+        <p className="small muted">Cancelling returns the crypto to the seller. <strong>Don&apos;t cancel if you already paid</strong> — open a dispute instead.</p>
+        <div>
+          <Button variant="danger" size="sm" busy={busy === "cancel"} disabled={!!busy} onClick={() => run("cancel", () => client.buyerCancel(id), "Trade cancelled.")}>
+            Cancel trade
+          </Button>
+        </div>
       </ActionBox>
     );
   }
 
+  // The deadline that matters right now, shown in the header.
+  const deadline =
+    t.state === TradeState.LOCKED ? { label: "Payment due", at: paymentDeadline }
+    : t.state === TradeState.PAID ? { label: "Buyer may dispute", at: releaseDeadline }
+    : t.state === TradeState.FEE_PENDING ? { label: "Fee match due", at: feeDeadline }
+    : t.state === TradeState.DISPUTED ? { label: d.escalated ? "Can be closed" : "Can escalate", at: d.escalated ? terminalAt : escalateAt }
+    : null;
+
+  const roleLine = isBuyer ? <>You&apos;re <strong>buying</strong> from <Addr address={t.seller} /></>
+    : isSeller ? <>You&apos;re <strong>selling</strong> to <Addr address={t.buyer} /></>
+    : <><Addr address={t.seller} /> → <Addr address={t.buyer} /></>;
+
+  const kvRows: [ReactNode, ReactNode][] = [
+    ["Seller", <Addr key="s" address={t.seller} you={isSeller} />],
+    ["Buyer", <Addr key="b" address={t.buyer} you={isBuyer} />],
+    ["Arbitrator", `${arbitratorName(t.activeArbitrator !== zeroAddress ? t.activeArbitrator : t.arbitrator)}${d.escalated ? " (fallback)" : ""}`],
+  ];
+  if (t.state === TradeState.DISPUTED) kvRows.push(["Assigned panelist", assignee === zeroAddress ? "Not assigned yet" : shortAddr(assignee)]);
+  if (deadline) kvRows.push([deadline.label, <span key="d" className="mono">{fmtTs(deadline.at)}</span>]);
+
   return (
-    <div style={{ display: "grid", gap: 14 }}>
-      <Card title={`TRADE #${id}`} right={<StateBadge state={t.state} />}>
-        <div style={{ background: colors.inset, borderRadius: 10, padding: "0 14px" }}>
-          <FieldRow label="AMOUNT" value={<strong style={{ fontSize: 18, color: colors.greenText }}>{fmtToken(t.amount)} USDT</strong>} />
-          <FieldRow label="SELLER" value={<code style={{ fontFamily: mono, fontSize: 11 }}>{t.seller}{isSeller ? " (you)" : ""}</code>} />
-          <FieldRow label="BUYER" value={<code style={{ fontFamily: mono, fontSize: 11 }}>{t.buyer}{isBuyer ? " (you)" : ""}</code>} />
-          {t.state === TradeState.LOCKED && <FieldRow label="PAYMENT DUE" value={`${fmtTs(paymentDeadline)} · ${countdown(paymentDeadline)}`} />}
-          {releaseDeadline > 0 && t.state === TradeState.PAID && <FieldRow label="BUYER MAY DISPUTE" value={`${fmtTs(releaseDeadline)} · ${countdown(releaseDeadline)}`} />}
-          {t.state === TradeState.FEE_PENDING && <FieldRow label="FEE MATCH DEADLINE" value={`${fmtTs(feeDeadline)} · ${countdown(feeDeadline)}`} />}
-          {t.state === TradeState.DISPUTED && (
-            <>
-              <FieldRow label="ARBITRATOR" value={`${arbitratorName(t.activeArbitrator)}${d.escalated ? " (fallback)" : ""}`} />
-              <FieldRow label="ASSIGNED PANELIST" value={assignee === zeroAddress ? "Not assigned yet" : shortAddr(assignee)} />
-              <FieldRow label={d.escalated ? "CAN BE CLOSED" : "CAN ESCALATE"} value={countdown(d.escalated ? terminalAt : escalateAt)} />
-            </>
-          )}
-        </div>
-        {claimable > 0n && (
-          <div style={{ marginTop: 12 }}>
-            <Notice tone="ok">
-              You have {formatEther(claimable)} ETH of dispute fees to withdraw.{" "}
-              <Button variant="primary" disabled={!!busy} onClick={() => run("refund", () => client.withdrawNative(), "Fees withdrawn.")}>Withdraw</Button>
-            </Notice>
-          </div>
+    <div className="stack">
+      <Card
+        title={<>Trade <span className="mono">#{id.toString()}</span> <StateBadge state={t.state} /></>}
+        right={deadline && (
+          <span className={`chip ${now > deadline.at ? "chip-danger" : "chip-warn"}`} title={fmtTs(deadline.at)}>
+            {deadline.label} {countdown(deadline.at)}
+          </span>
         )}
-        {!isParty && open && <div style={{ marginTop: 12 }}><Notice tone="info">You&apos;re viewing someone else&apos;s trade. Only the time-based closing actions are open to you.</Notice></div>}
-        {actions.length > 0 && <div style={{ display: "grid", gap: 10, marginTop: 14 }}>{actions}</div>}
-        {message && <div style={{ marginTop: 12 }}><Notice tone={message.tone}>{message.text}</Notice></div>}
+      >
+        <div className="stack">
+          <div className="stack-xs">
+            <div className="big-num">{fmtToken(t.amount)} <span className="faint" style={{ fontSize: 14 }}>{SYM}</span></div>
+            {fiat && terms.data && (
+              <div className="small faint">
+                for <span className="mono muted strong">{fiat}</span> at {Number(terms.data.price).toLocaleString("en-US")} {terms.data.fiatCurrency}/{SYM}
+              </div>
+            )}
+            <div className="small muted row" style={{ gap: 6 }}>{roleLine}</div>
+          </div>
+
+          <Progress state={t.state} summary={summary} />
+
+          {!isParty && open && <Notice tone="info">You&apos;re viewing someone else&apos;s trade. Only the time-based closing actions are open to you.</Notice>}
+
+          {claimable > 0n && (
+            <Notice tone="ok">
+              <div className="row-between">
+                <span>{formatEther(claimable)} ETH of dispute fees to collect.</span>
+                <Button size="sm" busy={busy === "refund"} onClick={() => run("refund", () => client.withdrawNative(), "Fees withdrawn.")}>Withdraw</Button>
+              </div>
+            </Notice>
+          )}
+
+          {actions.length > 0 && (
+            <div className="stack-sm">
+              <span className="eyebrow">{isParty ? "Your next step" : "Available actions"}</span>
+              {actions}
+            </div>
+          )}
+          {actions.length === 0 && open && isParty && (
+            <Notice tone="info">
+              {t.state === TradeState.LOCKED ? "Waiting for the buyer to pay and confirm." : t.state === TradeState.PAID ? "Waiting for the seller to check their bank and release." : "With the arbitrator. Nothing to do right now."}
+            </Notice>
+          )}
+          {message && <Notice tone={message.tone}>{message.text}</Notice>}
+
+          <details>
+            <summary className="small faint" style={{ cursor: "pointer" }}>Trade details</summary>
+            <div style={{ marginTop: 10 }}>
+              <KV rows={kvRows} />
+            </div>
+          </details>
+        </div>
       </Card>
 
       {t.state === TradeState.DISPUTED && isParty && (
         <EvidenceCard tradeId={id} isBuyer={isBuyer} panelistKey={panelistKey} assignee={assignee} onSubmitted={() => void chain.refetch()} />
       )}
 
-      <TradeChatPanel tradeId={id} seller={t.seller} buyer={t.buyer} />
+      {/* A finished trade needs no chat; only show its history if messaging is already unlocked. */}
+      {(open || identity) && <TradeChatPanel tradeId={id} seller={t.seller} buyer={t.buyer} />}
 
       <Timeline summary={summary} />
     </div>
   );
 }
 
-function ActionBox({ title, children }: { title: string; children: ReactNode }) {
+function ActionBox({ title, note, children }: { title: string; note?: string; children: ReactNode }) {
   return (
-    <div style={{ padding: 14, borderRadius: 10, background: colors.inset, border: `1px solid ${colors.border}` }}>
-      <div style={{ fontWeight: 700, color: colors.strong, fontSize: 14, marginBottom: 8 }}>{title}</div>
+    <div className="action">
+      <div className="stack-xs">
+        <h3>{title}</h3>
+        {note && <p className="small faint">{note}</p>}
+      </div>
       {children}
+    </div>
+  );
+}
+
+// ─── Progress ─────────────────────────────────────────────────────────────────
+
+type StepStatus = "done" | "current" | "todo" | "bad";
+
+function Progress({ state, summary }: { state: number; summary: TradeSummary }) {
+  const wentToDispute = summary.events.some((e) => e.name === "DisputeRequested");
+  const paid = summary.events.some((e) => e.name === "PaymentMarked");
+  let steps: { label: string; status: StepStatus }[];
+  if (state === TradeState.CANCELLED) {
+    steps = [{ label: "Locked", status: "done" }];
+    if (paid) steps.push({ label: "Paid", status: "done" });
+    if (wentToDispute) steps.push({ label: "Dispute", status: "done" });
+    steps.push({ label: "Returned", status: "bad" });
+  } else if (wentToDispute || state === TradeState.FEE_PENDING || state === TradeState.DISPUTED) {
+    const resolved = state === TradeState.RELEASED;
+    steps = [
+      { label: "Locked", status: "done" },
+      { label: "Paid", status: "done" },
+      { label: "Dispute", status: resolved ? "done" : "current" },
+      { label: "Resolved", status: resolved ? "done" : "todo" },
+    ];
+  } else {
+    steps = [
+      { label: "Locked", status: state === TradeState.LOCKED ? "current" : "done" },
+      { label: "Paid", status: state === TradeState.PAID ? "current" : state === TradeState.RELEASED ? "done" : "todo" },
+      { label: "Released", status: state === TradeState.RELEASED ? "done" : "todo" },
+    ];
+  }
+  return (
+    <div className="stepper" aria-label="Trade progress">
+      {steps.map((s) => (
+        <div key={s.label} className={`step ${s.status}`} aria-current={s.status === "current" ? "step" : undefined}>
+          <div className="step-bar" />
+          <span className="step-label">{s.label}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -330,24 +472,23 @@ function EvidenceCard({ tradeId, isBuyer, panelistKey, assignee, onSubmitted }: 
   }
 
   return (
-    <Card title="DISPUTE EVIDENCE">
+    <Card title="Dispute evidence" sub="Only the assigned panelist can open what you submit.">
       <MessagingGate reason="seal evidence for the arbitrator">
         {!panelistKey ? (
           <Notice tone="info">
             {assignee === zeroAddress ? "The arbitration firm hasn't assigned a panelist yet." : "The assigned arbitrator hasn't published an encryption key."} You can submit evidence once a panelist with a published key is assigned.
           </Notice>
         ) : (
-          <div style={{ display: "grid", gap: 10 }}>
-            <p style={{ fontSize: 12, color: colors.muted, margin: 0 }}>
-              Evidence is encrypted on this device and its key is sealed so that <strong>only panelist {shortAddr(assignee)}</strong> can open it. The other party can see that you submitted something, but not what.
+          <div className="stack-sm">
+            <p className="small muted p0">
+              Encrypted on this device, with the key sealed so that <strong>only panelist {shortAddr(assignee)}</strong> can open it. The other party can see that you submitted something, but not what.
             </p>
-            {stored && !file && <Notice tone="ok">Using the receipt you attached when marking paid ({stored.fileName}) — its fingerprint {shortHash(stored.commitment)} is already on-chain.</Notice>}
-            <label>
-              <Label hint={stored ? "or choose a different file" : undefined}>FILE</Label>
-              <input type="file" accept="image/*,application/pdf" onChange={(e) => setFile(e.target.files?.[0] ?? null)} style={{ color: "#94a3b8", fontSize: 12 }} />
-            </label>
+            {stored && !file && <Notice tone="ok">Using the receipt you attached when marking paid ({stored.fileName}) — fingerprint <span className="mono">{shortHash(stored.commitment)}</span> is already on-chain.</Notice>}
+            <Field label="File" hint={stored ? "or choose a different one" : undefined}>
+              <input className="file" type="file" accept="image/*,application/pdf" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+            </Field>
             <div>
-              <Button variant="blue" solid disabled={busy || (!file && !stored)} onClick={() => void submit()}>{busy ? "Confirm in wallet…" : "Seal & submit evidence"}</Button>
+              <Button variant="primary" busy={busy} disabled={!file && !stored} onClick={() => void submit()}>Seal &amp; submit evidence</Button>
             </div>
             {message && <Notice tone={message.tone}>{message.text}</Notice>}
           </div>
@@ -362,28 +503,30 @@ function EvidenceCard({ tradeId, isBuyer, panelistKey, assignee, onSubmitted }: 
 function Timeline({ summary }: { summary: TradeSummary }) {
   const describe = (name: string, args: Record<string, unknown>): string => {
     switch (name) {
-      case "TradeOpened": return `Buyer locked ${fmtToken(args.amount as bigint)} USDT from the seller's vault`;
-      case "PaymentMarked": return (args.evidenceCommitment as string) === zeroHash ? "Buyer marked the fiat as sent" : `Buyer marked the fiat as sent · receipt fingerprint ${shortHash(args.evidenceCommitment as string)}`;
+      case "TradeOpened": return `Buyer locked ${fmtToken(args.amount as bigint)} ${SYM} from the seller's vault`;
+      case "PaymentMarked": return (args.evidenceCommitment as string) === zeroHash ? "Buyer marked the payment as sent" : `Buyer marked the payment as sent · receipt fingerprint ${shortHash(args.evidenceCommitment as string)}`;
       case "DisputeRequested": return `Dispute opened by ${shortAddr(args.opener as string)} (fee ${formatEther(args.feePaid as bigint)} ETH)`;
       case "ArbitrationFeePaid": return `${shortAddr(args.party as string)} matched the arbitration fee`;
       case "DisputeCreated": return `Case #${args.disputeId} created with ${arbitratorName(args.arbitrator as string)}`;
       case "Escalated": return `Escalated to ${arbitratorName(args.fallbackArbitrator as string)}`;
       case "Evidence": return `${shortAddr(args.party as string)} submitted sealed evidence`;
       case "FeesSettled": return `Dispute fees settled (buyer ${formatEther(args.toBuyer as bigint)} ETH, seller ${formatEther(args.toSeller as bigint)} ETH)`;
-      case "Released": return `${fmtToken(args.amount as bigint)} USDT released to buyer · ${RELEASE_REASONS[Number(args.reason)] ?? ""}`;
-      case "Cancelled": return `Crypto returned to seller · ${CANCEL_REASONS[Number(args.reason)] ?? ""}`;
+      case "Released": return `${fmtToken(args.amount as bigint)} ${SYM} released to the buyer · ${RELEASE_REASONS[Number(args.reason)] ?? ""}`;
+      case "Cancelled": return `Crypto returned to the seller · ${CANCEL_REASONS[Number(args.reason)] ?? ""}`;
       default: return name;
     }
   };
   return (
-    <Card title="ON-CHAIN ACTIVITY">
-      <ol style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 10 }}>
+    <Card title="On-chain record" sub="Every step, read straight from the escrow contract.">
+      <ol className="timeline">
         {summary.events.map((e) => (
-          <li key={`${e.txHash}-${e.logIndex}`} style={{ display: "flex", gap: 10 }}>
-            <span style={{ color: colors.blueText }}>•</span>
-            <div>
-              <div style={{ fontSize: 13, color: colors.text }}>{describe(e.name, e.args)}</div>
-              <div style={{ fontSize: 11, color: colors.muted }}>{e.timestamp ? fmtTs(e.timestamp) : "—"} · block {e.blockNumber.toString()} · <code style={{ fontFamily: mono }}>{shortHash(e.txHash)}</code></div>
+          <li key={`${e.txHash}-${e.logIndex}`}>
+            <span className="node" aria-hidden />
+            <div className="stack-xs">
+              <span className="small">{describe(e.name, e.args)}</span>
+              <span className="tiny faint">
+                {e.timestamp ? fmtTs(e.timestamp) : "—"} · block <span className="mono">{e.blockNumber.toString()}</span> · <TxLink hash={e.txHash} />
+              </span>
             </div>
           </li>
         ))}
