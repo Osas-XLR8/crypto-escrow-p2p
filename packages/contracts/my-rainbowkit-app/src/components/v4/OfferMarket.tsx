@@ -7,6 +7,7 @@ import { buildCancelEvent, type ParsedOffer } from "@escrowx/sdk";
 import { useEscrowX } from "@/context/EscrowX";
 import { CHAIN_ID, FIAT_CURRENCIES, RELAYS, V4, arbitratorName } from "@/config/v4";
 import { Addr, Button, Card, Chip, Empty, Notice, errorText } from "@/components/ui";
+import { fmtDuration } from "@/lib/format";
 import { fmtFiat, fmtToken, parseTokenInput, rememberPeerKey, rememberTradeTerms } from "@/lib/v4/local";
 
 /** Rejections that mean "someone tried to fake or tamper with an offer" (not just old or for another deployment). */
@@ -220,7 +221,7 @@ function OfferRow({ offer, best, remaining, isMine, onTaken, onChanged }: {
             {terms.paymentMethods.map((m) => <Chip key={m}>{m}</Chip>)}
           </div>
           <div className="small faint">
-            Pay within {payMinutes} min · Disputes: {arbitratorName(o.arbitrator)} · {expiresIn > 0 ? `expires in ${Math.max(1, Math.round(expiresIn / 3600))}h` : "expired"}
+            Pay within {payMinutes} min · Disputes: {arbitratorName(o.arbitrator)} · {expiresIn > 0 ? `expires in ${fmtDuration(expiresIn)}` : "expired"}
           </div>
           {terms.conditions && <p className="offer-terms">{terms.conditions}</p>}
         </div>

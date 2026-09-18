@@ -18,6 +18,11 @@ so any free static host can serve it.
 A first-run checklist (gas → test tokens → messaging) appears on test networks until setup is done.
 Light and dark themes follow the system, with a toggle in the header.
 
+**Arbitration desk** (`/arbitrate`, linked in the footer) is for arbitration firms: the firm admin manages the
+panel and assigns cases; the assigned panelist opens the sealed evidence (checked against the fingerprint the buyer
+committed on-chain), proposes a ruling with a hashed written decision, and after the review period anyone can
+execute it. The admin can veto during review.
+
 ## Run it
 
 ### Against a public testnet (Base Sepolia)
@@ -35,8 +40,18 @@ Sepolia ETH from a faucet (the whole deploy costs about 0.0002 ETH), then:
 ./deploy-testnet.sh
 ```
 
-This deploys the contracts, verifies the source on Blockscout, and writes `deployments/v4-84532.json`. Then,
-from this folder:
+This deploys the contracts, verifies the source on Blockscout, and writes `deployments/v4-84532.json`. It uses
+the shortest timings the contracts allow (fee match 1 day, arbitrator deadline 7 days, firm review 1 hour), so a
+full dispute can be demoed with a one-hour wait.
+
+To give visitors a live market, seed demo offers from `packages/sdk` (three demo sellers, six offers in NGN, KES,
+GHS and ZAR, valid 7 days; re-run to refresh):
+
+```bash
+npm run build && npm run seed:demo
+```
+
+Then, from this folder:
 
 ```bash
 npm run sync:v4 -- 84532
@@ -126,6 +141,6 @@ after changing any `NEXT_PUBLIC_*` value. The SDK is a local `file:` dependency,
   from every relay, the fiat amount isn't shown; the crypto amount always is.
 - **Local chains only produce blocks when a transaction arrives**, so a deadline action can be rejected
   against a stale timestamp. Mine a block and retry. Real networks don't have this.
-- **Encrypted evidence files stay on the device that created them.** Submitting seals the key on-chain for the
-  arbitrator and downloads the encrypted file to hand over. Shared storage is still to be decided.
-- **Arbitrator tooling isn't in this app.** Firms assign panelists and rule through their own adapter contract.
+- **Evidence files travel outside the app.** Submitting seals the key on-chain for the arbitrator and downloads the
+  encrypted file, which the party sends to the firm; the panelist uploads it on the desk, where it's checked against
+  the on-chain fingerprint before decrypting. Shared storage is still to be decided.

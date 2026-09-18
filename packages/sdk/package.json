@@ -14,7 +14,8 @@
     "gen:abi": "node scripts/gen-abi.mjs",
     "test": "vitest run test/unit",
     "test:e2e": "vitest run test/e2e",
-    "relay": "node scripts/dev-relay.mjs"
+    "relay": "node scripts/dev-relay.mjs",
+    "seed:demo": "node scripts/seed-demo.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.25.2",

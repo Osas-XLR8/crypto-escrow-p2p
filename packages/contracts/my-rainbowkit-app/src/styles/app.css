@@ -146,7 +146,10 @@ code, .mono { font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, mo
   border: 0; background: transparent; padding: 6px 12px; border-radius: 7px; cursor: pointer;
   font-size: 13px; font-weight: 500; color: var(--text-2); display: inline-flex; align-items: center; gap: 6px;
 }
-.nav button:hover { color: var(--text); }
+.nav a {
+  padding: 6px 12px; border-radius: 7px; font-size: 13px; font-weight: 500; color: var(--text-2); text-decoration: none; display: inline-flex; align-items: center;
+}
+.nav button:hover, .nav a:hover { color: var(--text); }
 .nav button[aria-current="page"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow), 0 0 0 1px var(--border); }
 .header-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 @media (max-width: 720px) {

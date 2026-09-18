@@ -39,6 +39,11 @@ esac
 export PRIVATE_KEY
 export MINT_TO=${MINT_TO:-$DEPLOYER}
 export FIRM_FEE=${FIRM_FEE:-500000000000000} # 0.0005 ETH: cheap enough for faucet-funded testers
+# Shortest values the contracts allow (their MIN_* constants), so a full dispute can be demoed with a ~1 hour
+# wait: fee match window 1 day, arbitrator deadline 7 days, firm review period 1 hour.
+export FEE_TIMEOUT=${FEE_TIMEOUT:-86400}
+export ARBITRATION_TIMEOUT=${ARBITRATION_TIMEOUT:-604800}
+export REVIEW_PERIOD=${REVIEW_PERIOD:-3600}
 
 VERIFY_ARGS=()
 if [ -n "$VERIFIER_URL" ] && [ "${VERIFY:-1}" = "1" ]; then
