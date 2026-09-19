@@ -155,6 +155,12 @@ export class EscrowV4Client {
     });
     const approveHash = await wallet.writeContract({ ...request, chain } as never);
     await this.publicClient.waitForTransactionReceipt({ hash: approveHash });
+    // Load-balanced public RPCs can answer the next call from a node that hasn't seen the approval yet,
+    // which makes the deposit simulation fail with "transferFrom failed". Wait until the allowance shows.
+    await waitUntil(async () => {
+      const allowance = await this.publicClient.readContract({ address: token, abi: erc20Abi, functionName: "allowance", args: [account.address, this.escrow] });
+      return allowance >= amount;
+    });
     return this.write("deposit", [token, amount]);
   }
 
@@ -226,5 +232,14 @@ export class EscrowV4Client {
 
   withdrawNative() {
     return this.write("withdrawNative", []);
+  }
+}
+
+/** Polls `check` until it returns true (or gives up after `timeoutMs`, letting the caller's next step surface the error). */
+async function waitUntil(check: () => Promise<boolean>, timeoutMs = 20_000, intervalMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check().catch(() => false)) return;
+    await new Promise((r) => setTimeout(r, intervalMs));
   }
 }

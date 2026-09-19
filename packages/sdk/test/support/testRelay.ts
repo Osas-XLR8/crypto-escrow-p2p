@@ -70,6 +70,13 @@ export async function startTestRelay(): Promise<TestRelay> {
 
       if (type === "REQ") {
         const [subId, ...filters] = rest as [string, ...Filter[]];
+        // Like real relays (NIP-01): only single-letter tag filters are indexed. Refuse anything else loudly,
+        // so a client query that would silently match nothing in production fails in tests too.
+        const unindexed = filters.flatMap((f) => Object.keys(f)).find((k) => k.startsWith("#") && k.length !== 2);
+        if (unindexed) {
+          send(ws, ["CLOSED", subId, `unsupported: unindexed tag filter ${unindexed}`]);
+          return;
+        }
         subs.get(ws)!.set(subId, filters);
         const limit = Math.min(...filters.map((f) => f.limit ?? Infinity));
         const matched = events

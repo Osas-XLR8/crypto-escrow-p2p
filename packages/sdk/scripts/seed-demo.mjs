@@ -134,6 +134,12 @@ for (const [i, seller] of SELLERS.entries()) {
     const held = await publicClient.readContract({ address: d.usdt, abi: erc20Abi, functionName: "balanceOf", args: [account.address] });
     if (held < shortfall) {
       await send(deployerWallet.writeContract({ address: d.usdt, abi: mintAbi, functionName: "mint", args: [account.address, shortfall - held] }));
+      // Public RPCs are load-balanced: wait until the node we query sees the mint before depositing.
+      for (let tries = 0; tries < 20; tries++) {
+        const now = await publicClient.readContract({ address: d.usdt, abi: erc20Abi, functionName: "balanceOf", args: [account.address] });
+        if (now >= shortfall) break;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
     }
     await client.deposit(d.usdt, shortfall);
     console.log(`  + deposited ${Number(shortfall) / 1e6} ${SYMBOL} (vault now ${Number(needed) / 1e6})`);

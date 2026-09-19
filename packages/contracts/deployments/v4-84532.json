@@ -1,0 +1,10 @@
+{
+  "chainId": 84532,
+  "deployBlock": 47008466,
+  "escrow": "0x140b45C906b76822e25a2FF35F105E9520ddB31c",
+  "fallbackArbitrator": "0x3eA5E1f0EdE8aCfe3723C35106532d495fCa510e",
+  "firmFee": 500000000000000,
+  "primaryArbitrator": "0x8E8B0B02C70596a3D5adc7f64d242872187355a2",
+  "tokenFaucet": true,
+  "usdt": "0xF40db002cd56f88a0B1e1DCA7ed762d8d1fAD881"
+}

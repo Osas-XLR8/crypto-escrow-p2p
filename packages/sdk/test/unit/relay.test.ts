@@ -43,6 +43,22 @@ describe("OfferBook over relays", () => {
     expect(onlyB.offers).toHaveLength(1);
   });
 
+  it("queries relays by indexed tags only and ignores other deployments", async () => {
+    const book = new OfferBook([relayA.url], {}, pool);
+    // NIP-01 relays only index single-letter tags; anything else matches nothing on real relays.
+    expect(Object.keys(book.filter({ chainId: CHAIN_ID, fiatCurrency: "INR" })).filter((k) => k.startsWith("#") && k.length !== 2)).toEqual([]);
+
+    const here = await party();
+    const elsewhere = await party();
+    await book.publish(buildOfferEvent({ ...(await signedOffer(here, terms({ fiatCurrency: "INR", price: "88.1" }))), binding: here.binding, identity: here.identity }));
+    const otherChain = await signedOffer(elsewhere, terms({ fiatCurrency: "INR", price: "88", chainId: 84532 }));
+    await book.publish(buildOfferEvent({ ...otherChain, binding: elsewhere.binding, identity: elsewhere.identity }));
+
+    const { offers, rejected } = await book.fetch({ chainId: CHAIN_ID, fiatCurrency: "INR" });
+    expect(offers.map((o) => o.offer.seller)).toEqual([here.account.address]);
+    expect(rejected).toEqual([]); // another deployment's offer is not a forgery
+  });
+
   it("filters out forged offers instead of trusting the relay", async () => {
     const book = new OfferBook([relayA.url], {}, pool);
     const seller = await party();

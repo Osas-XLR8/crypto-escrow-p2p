@@ -59,6 +59,9 @@ wss.on("connection", (ws) => {
       for (const [client, clientSubs] of subs) for (const [id, filters] of clientSubs) if (matchFilters(filters, e)) send(client, ["EVENT", id, e]);
     } else if (type === "REQ") {
       const [subId, ...filters] = rest;
+      // Like real relays (NIP-01): only single-letter tag filters are indexed.
+      const unindexed = filters.flatMap((f) => Object.keys(f)).find((k) => k.startsWith("#") && k.length !== 2);
+      if (unindexed) return send(ws, ["CLOSED", subId, `unsupported: unindexed tag filter ${unindexed}`]);
       subs.get(ws).set(subId, filters);
       const limit = Math.min(...filters.map((f) => f.limit ?? Infinity));
       const matched = events.filter((e) => matchFilters(filters, e)).sort((a, b) => b.created_at - a.created_at);

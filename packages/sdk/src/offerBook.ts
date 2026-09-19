@@ -3,7 +3,7 @@
 
 import { SimplePool } from "nostr-tools/pool";
 import type { Event, Filter } from "nostr-tools";
-import { OFFER_EVENT_KIND, OfferEventError, PROTOCOL_TAG, network, parseOfferEvent, type ParseOptions, type ParsedOffer } from "./offerEvents.js";
+import { OFFER_EVENT_KIND, OfferEventError, PROTOCOL_TAG, parseOfferEvent, type ParseOptions, type ParsedOffer } from "./offerEvents.js";
 
 export interface OfferQuery {
   chainId: number;
@@ -35,8 +35,12 @@ export class OfferBook {
     this.pool = pool ?? new SimplePool();
   }
 
+  /**
+   * Relay query. Relays only index single-letter tags (NIP-01), so the network is NOT part of the filter —
+   * a `#network` filter matches nothing on real relays. The chain and escrow are checked per event instead.
+   */
   filter(q: OfferQuery): Filter {
-    const f: Filter = { kinds: [OFFER_EVENT_KIND], "#y": [PROTOCOL_TAG], "#network": [network(q.chainId)] };
+    const f: Filter = { kinds: [OFFER_EVENT_KIND], "#y": [PROTOCOL_TAG] };
     if (q.fiatCurrency) f["#f"] = [q.fiatCurrency];
     if (q.limit) f.limit = q.limit;
     return f;
@@ -73,6 +77,8 @@ export class OfferBook {
         const prev = latest.get(key);
         if (!prev || event.created_at > prev.event.created_at) latest.set(key, parsed);
       } catch (e) {
+        // Offers for another chain or escrow deployment share the protocol tag; they're not ours, not forged.
+        if (e instanceof OfferEventError && e.reason === "wrong_network") continue;
         rejected.push({ eventId: event.id, reason: e instanceof OfferEventError ? e.reason : String((e as Error).message) });
       }
     }
@@ -90,7 +96,10 @@ export class OfferBook {
             if (q.seller && parsed.offer.seller.toLowerCase() !== q.seller.toLowerCase()) return;
             onOffer(parsed);
           })
-          .catch((e) => onRejected?.(event.id, e instanceof OfferEventError ? e.reason : String(e)));
+          .catch((e) => {
+            if (e instanceof OfferEventError && e.reason === "wrong_network") return;
+            onRejected?.(event.id, e instanceof OfferEventError ? e.reason : String(e));
+          });
       },
     });
     return () => sub.close();
