@@ -11,9 +11,19 @@ so any free static host can serve it.
 
 | Tab | What it does |
 |---|---|
-| **Market** | Verified offers from the relays with live on-chain availability. Visitors can browse without a wallet. Buying shows exactly what you'll pay, then locks the seller's crypto. |
-| **Sell** | Vault (deposit / withdraw, test-token faucet on testnets), your live offers, and a form to publish new ones. |
-| **Trades** | Your trades rebuilt from contract events: a progress bar, the one next step for your role, deadlines, encrypted chat, disputes and evidence. |
+| **Market** | A **Buy / Sell** switch, like any P2P market. *Buy* lists sell offers: taking one locks the seller's crypto and you pay them. *Sell* lists buy offers: filling one locks **your** crypto (vault first, then wallet) and the buyer pays you. Offers come from relays, verified in the browser; visitors can browse without a wallet. |
+| **My offers** | Post an offer to **sell** (backed by your vault) or to **buy** (a signature only; sellers bring the crypto), manage your vault and test-token faucet, and cancel your offers. |
+| **Trades** | Your trades rebuilt from contract events: a progress bar, the one next step for your role, deadlines, the private chat, disputes and evidence. |
+
+**Chat** is an end-to-end encrypted conversation per trade (NIP-17). Both sides connect automatically when the trade
+opens — each proves its messaging key belongs to the wallet recorded on-chain — and only that key is trusted.
+Your own messages are sealed to you as well, so the thread survives reloads and other devices. On-chain milestones
+(locked, paid, released, disputes) appear in the thread straight from the contract. The seller shares where to pay;
+the buyer can attach a transfer reference when tapping "I've paid".
+
+**Notifications**: toasts when the other side acts on-chain (someone took your offer, the buyer marked paid, crypto
+released, a dispute opened) or messages you, unread badges per trade, the tab title counts events while you're away,
+and optional browser notifications.
 
 A first-run checklist (gas → test tokens → messaging) appears on test networks until setup is done.
 Light and dark themes follow the system, with a toggle in the header.
@@ -44,8 +54,8 @@ This deploys the contracts, verifies the source on Blockscout, and writes `deplo
 the shortest timings the contracts allow (fee match 1 day, arbitrator deadline 7 days, firm review 1 hour), so a
 full dispute can be demoed with a one-hour wait.
 
-To give visitors a live market, seed demo offers from `packages/sdk` (three demo sellers, six offers in NGN, KES,
-GHS and ZAR, valid 7 days; re-run to refresh):
+To give visitors a live market, seed demo offers from `packages/sdk` — three demo sellers with six sell offers and two
+demo buyers with four buy offers, across NGN, KES, GHS and ZAR, valid 7 days (re-run to refresh):
 
 ```bash
 npm run build && npm run seed:demo
@@ -137,7 +147,7 @@ after changing any `NEXT_PUBLIC_*` value. The SDK is a local `file:` dependency,
 - **tUSDT is a worthless test token** with a public faucet (1,000 per address per hour). It is deliberately
   not named after Tether.
 - **Price and currency live in the signed offer, not on-chain.** Trades show the fiat amount by matching the
-  on-chain offer hash to the offer on the relays (or from memory on the buyer's device). If the offer is gone
+  on-chain offer hash to the offer on the relays (or from memory on the device that opened the trade). If the offer is gone
   from every relay, the fiat amount isn't shown; the crypto amount always is.
 - **Local chains only produce blocks when a transaction arrives**, so a deadline action can be rejected
   against a stale timestamp. Mine a block and retry. Real networks don't have this.

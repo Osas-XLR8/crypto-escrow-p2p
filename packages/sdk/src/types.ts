@@ -19,6 +19,32 @@ export interface Offer {
   salt: Hex;
 }
 
+/** Mirrors EscrowCoreV4.BuyOffer: the buyer is the maker ("I want to buy"); a seller takes it. */
+export interface BuyOffer {
+  buyer: Address;
+  token: Address;
+  minAmount: bigint;
+  maxAmount: bigint;
+  totalAmount: bigint;
+  paymentWindow: bigint;
+  releaseWindow: bigint;
+  arbitrator: Address;
+  fallbackArbitrator: Address;
+  termsHash: Hex;
+  nonce: bigint;
+  expiry: bigint;
+  salt: Hex;
+}
+
+/** "sell": a seller-signed Offer that buyers take. "buy": a buyer-signed BuyOffer that sellers take. */
+export type OfferSide = "sell" | "buy";
+export type AnyOffer = Offer | BuyOffer;
+
+export const isBuyOffer = (offer: AnyOffer): offer is BuyOffer => "buyer" in offer;
+export const offerSide = (offer: AnyOffer): OfferSide => (isBuyOffer(offer) ? "buy" : "sell");
+/** Whoever signed the offer: the seller of a sell offer, the buyer of a buy offer. */
+export const offerMaker = (offer: AnyOffer): Address => (isBuyOffer(offer) ? offer.buyer : offer.seller);
+
 /**
  * Human terms the on-chain offer commits to via `termsHash`. Never contains the seller's bank
  * details — those are sent only to a buyer who has locked a trade, over encrypted chat.

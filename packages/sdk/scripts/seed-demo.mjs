@@ -1,7 +1,9 @@
 #!/usr/bin/env node
-// Seeds a demo market: a few demo seller wallets, each funded with a little gas and test tokens, deposit into
-// their vault and publish realistic signed offers to the relays. Re-running refreshes the offers (the previous
-// ones are withdrawn from the relays) and only tops balances up when they're low.
+// Seeds a demo market on both sides:
+//   • demo SELLERS: funded with a little gas and test tokens, deposit into their vault, publish sell offers
+//   • demo BUYERS: publish buy offers (signing only — no gas or tokens needed until someone fills them)
+// Re-running refreshes the offers (the previous ones are withdrawn from the relays) and only tops balances
+// up when they're low.
 //
 //   npm run build && npm run seed:demo                      # Base Sepolia, keys from contracts/.env.testnet
 //   npm run seed:demo -- --chain 31337                      # local Anvil + local relay
@@ -22,6 +24,7 @@ import {
   buildCancelEvent,
   buildOfferEvent,
   createBinding,
+  createBuyOffer,
   createOffer,
   deriveNostrIdentity,
   signOffer,
@@ -83,6 +86,24 @@ const SELLERS = [
     offers: [
       { fiat: "GHS", price: "15.35", methods: ["MTN MoMo", "Bank transfer"], min: 10, max: 400, total: 1200, pay: 30, conditions: "MoMo preferred. No cash deposits." },
       { fiat: "ZAR", price: "18.9", methods: ["Bank transfer", "Capitec Pay"], min: 25, max: 500, total: 800, pay: 60, conditions: "EFT from your own account. Allow up to an hour for bank clearing." },
+    ],
+  },
+];
+
+/** Demo buyers bid a little under the sellers' asks, like a real order book. */
+const BUYERS = [
+  {
+    label: "demo buyer 1",
+    offers: [
+      { fiat: "NGN", price: "1575", methods: ["Bank transfer", "Opay"], min: 20, max: 400, total: 1200, pay: 30, conditions: "I pay from an account in my own name within minutes of the trade opening." },
+      { fiat: "GHS", price: "15.1", methods: ["MTN MoMo"], min: 10, max: 300, total: 600, pay: 30, conditions: "MoMo only. Please share the MoMo name in the chat." },
+    ],
+  },
+  {
+    label: "demo buyer 2",
+    offers: [
+      { fiat: "NGN", price: "1582", methods: ["PalmPay", "Moniepoint"], min: 50, max: 800, total: 2000, pay: 20, conditions: "Regular buyer. Instant transfer, reference included." },
+      { fiat: "KES", price: "128.8", methods: ["M-Pesa"], min: 10, max: 250, total: 750, pay: 20, conditions: "M-Pesa from my own line." },
     ],
   },
 ];
@@ -152,11 +173,11 @@ for (const [i, seller] of SELLERS.entries()) {
   const binding = await createBinding(wallet, account.address, identity.publicKey);
 
   // Withdraw this seller's previous demo offers from the relays so re-runs don't pile up duplicates.
-  const previous = await book.fetch({ chainId: CHAIN_ID, seller: account.address });
+  const previous = await book.fetch({ chainId: CHAIN_ID, maker: account.address });
   for (const old of previous.offers) await book.publish(buildCancelEvent(old, identity));
   if (previous.offers.length) console.log(`  - withdrew ${previous.offers.length} previous offer(s) from relays`);
 
-  const nonce = await client.sellerNonce(account.address);
+  const nonce = await client.makerNonce(account.address);
   const expiry = BigInt(Math.floor(Date.now() / 1000) + EXPIRY_DAYS * 86400);
   for (const o of seller.offers) {
     const terms = {
@@ -189,6 +210,47 @@ for (const [i, seller] of SELLERS.entries()) {
     if (ok === 0) throw new Error(`no relay accepted the offer: ${results.map((r) => r.message).join("; ")}`);
     published++;
     console.log(`  ✓ ${o.price} ${o.fiat}/${SYMBOL} · ${o.min}–${o.max} · ${o.methods.join(", ")} (${ok}/${RELAYS.length} relays)`);
+  }
+}
+
+// ─── Seed each buyer (buy offers: signatures only) ────────────────────────────
+
+for (const [i, buyer] of BUYERS.entries()) {
+  const account = privateKeyToAccount(keccak256(toBytes(`${deployerKey()}:escrowx-demo-buyer-${i + 1}`)));
+  const wallet = createWalletClient({ account, chain, transport: http(RPC) });
+  const client = new EscrowV4Client(publicClient, d.escrow, wallet);
+  console.log(`\n${buyer.label}: ${account.address}`);
+
+  const identity = await deriveNostrIdentity(wallet, account.address);
+  const binding = await createBinding(wallet, account.address, identity.publicKey);
+  const previous = await book.fetch({ chainId: CHAIN_ID, maker: account.address });
+  for (const old of previous.offers) await book.publish(buildCancelEvent(old, identity));
+  if (previous.offers.length) console.log(`  - withdrew ${previous.offers.length} previous offer(s) from relays`);
+
+  const nonce = await client.makerNonce(account.address);
+  const expiry = BigInt(Math.floor(Date.now() / 1000) + EXPIRY_DAYS * 86400);
+  for (const o of buyer.offers) {
+    const terms = { chainId: CHAIN_ID, escrow: d.escrow, tokenSymbol: SYMBOL, tokenDecimals: 6, fiatCurrency: o.fiat, price: o.price, paymentMethods: o.methods, conditions: o.conditions };
+    const offer = createBuyOffer({
+      buyer: account.address,
+      token: d.usdt,
+      minAmount: units(o.min),
+      maxAmount: units(o.max),
+      totalAmount: units(o.total),
+      paymentWindow: BigInt(o.pay * 60),
+      releaseWindow: 3600n,
+      arbitrator: d.primaryArbitrator,
+      fallbackArbitrator: d.fallbackArbitrator,
+      nonce,
+      expiry,
+      terms,
+    });
+    const signature = await signOffer(wallet, offer, CHAIN_ID, d.escrow);
+    const results = await book.publish(buildOfferEvent({ offer, signature, terms, binding, identity }));
+    const ok = results.filter((r) => r.ok).length;
+    if (ok === 0) throw new Error(`no relay accepted the offer: ${results.map((r) => r.message).join("; ")}`);
+    published++;
+    console.log(`  ✓ buying at ${o.price} ${o.fiat}/${SYMBOL} · ${o.min}–${o.max} · ${o.methods.join(", ")} (${ok}/${RELAYS.length} relays)`);
   }
 }
 

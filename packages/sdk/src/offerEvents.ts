@@ -2,17 +2,19 @@
 //
 // An offer event is trustworthy only if ALL of these hold, and parseOfferEvent checks every one:
 //   1. the Nostr event signature is valid
-//   2. the EIP-712 offer signature is valid for offer.seller (what the contract will check)
+//   2. the EIP-712 offer signature is valid for the offer's maker (what the contract will check):
+//      the seller of a sell offer, the buyer of a buy offer
 //   3. offer.termsHash commits to the published human terms (price, currency, rails)
-//   4. a wallet-signed binding says this Nostr key speaks for offer.seller
-//      (otherwise anyone could republish a seller's offer and intercept buyers' messages)
-//   5. tags agree with the content, and the offer is for the expected chain/escrow
+//   4. a wallet-signed binding says this Nostr key speaks for the maker
+//      (otherwise anyone could republish someone's offer and intercept their counterparties' messages)
+//   5. tags agree with the content (including the k = sell | buy side), and the offer is for the
+//      expected chain/escrow
 
 import { finalizeEvent, verifyEvent, type Event, type VerifiedEvent } from "nostr-tools/pure";
 import type { Address, Hex, PublicClient } from "viem";
 import { deserializeOffer, hashOffer, hashTerms, serializeOffer, validateTerms, verifyOfferSignature } from "./offers.js";
 import { sameAddress, verifyBinding } from "./identity.js";
-import type { NostrIdentity, Offer, OfferTerms, WalletBinding } from "./types.js";
+import { offerMaker, offerSide, type AnyOffer, type NostrIdentity, type OfferSide, type OfferTerms, type WalletBinding } from "./types.js";
 
 /** NIP-69 peer-to-peer order event kind (addressable, replaced by pubkey + kind + d). */
 export const OFFER_EVENT_KIND = 38383;
@@ -24,7 +26,11 @@ export type OfferStatus = "pending" | "canceled";
 export interface ParsedOffer {
   event: Event;
   offerHash: Hex;
-  offer: Offer;
+  /** "sell": the maker sells crypto (buyers take it). "buy": the maker buys crypto (sellers take it). */
+  side: OfferSide;
+  /** Wallet that signed the offer. */
+  maker: Address;
+  offer: AnyOffer;
   signature: Hex;
   terms: OfferTerms;
   binding: WalletBinding;
@@ -54,7 +60,7 @@ export function network(chainId: number): string {
 }
 
 export function buildOfferEvent(args: {
-  offer: Offer;
+  offer: AnyOffer;
   signature: Hex;
   terms: OfferTerms;
   binding: WalletBinding;
@@ -65,7 +71,7 @@ export function buildOfferEvent(args: {
   const { offer, signature, terms, binding, identity } = args;
   validateTerms(terms);
   if (hashTerms(terms) !== offer.termsHash) throw new Error("offer.termsHash does not match terms");
-  if (!sameAddress(binding.address, offer.seller)) throw new Error("binding is for a different wallet");
+  if (!sameAddress(binding.address, offerMaker(offer))) throw new Error("binding is for a different wallet");
   if (binding.nostrPubkey !== identity.publicKey) throw new Error("binding is for a different Nostr key");
 
   const offerHash = hashOffer(offer, terms.chainId, terms.escrow);
@@ -75,7 +81,7 @@ export function buildOfferEvent(args: {
       created_at: args.createdAt ?? Math.floor(Date.now() / 1000),
       tags: [
         ["d", offerHash],
-        ["k", "sell"],
+        ["k", offerSide(offer)],
         ["f", terms.fiatCurrency],
         ["s", args.status ?? "pending"],
         ["pm", ...terms.paymentMethods],
@@ -124,7 +130,7 @@ export async function parseOfferEvent(event: Event, opts: ParseOptions = {}): Pr
   if (!verifyEventStrict(event)) fail("bad_nostr_signature", "Nostr event signature is invalid");
 
   let body: { v?: unknown; offer?: unknown; signature?: unknown; terms?: unknown; binding?: unknown };
-  let offer!: Offer;
+  let offer!: AnyOffer;
   let terms!: OfferTerms;
   try {
     body = JSON.parse(event.content);
@@ -146,15 +152,18 @@ export async function parseOfferEvent(event: Event, opts: ParseOptions = {}): Pr
 
   const offerHash = hashOffer(offer, terms.chainId, terms.escrow);
   if (!(await verifyOfferSignature(offer, signature, terms.chainId, terms.escrow, opts.publicClient))) {
-    fail("bad_offer_signature", "offer is not signed by its seller");
+    fail("bad_offer_signature", "offer is not signed by its maker");
   }
+  const side = offerSide(offer);
+  const maker = offerMaker(offer);
 
   if (!(await verifyBinding(binding, opts.publicClient))) fail("bad_binding", "wallet binding signature is invalid");
-  if (!sameAddress(binding.address, offer.seller) || binding.nostrPubkey !== event.pubkey) {
-    fail("binding_mismatch", "this Nostr key is not bound to the offer's seller");
+  if (!sameAddress(binding.address, maker) || binding.nostrPubkey !== event.pubkey) {
+    fail("binding_mismatch", "this Nostr key is not bound to the offer's maker");
   }
 
   if (tag(event, "d")?.[1] !== offerHash) fail("tag_mismatch", "d tag must equal the offer hash");
+  if (tag(event, "k")?.[1] !== side) fail("tag_mismatch", "k tag must match the offer side");
   if (tag(event, "f")?.[1] !== terms.fiatCurrency) fail("tag_mismatch", "f tag must equal the fiat currency");
   if (tag(event, "network")?.[1] !== network(terms.chainId)) fail("tag_mismatch", "network tag mismatch");
   const statusTag = tag(event, "s")?.[1];
@@ -163,7 +172,7 @@ export async function parseOfferEvent(event: Event, opts: ParseOptions = {}): Pr
   const now = opts.now === undefined ? Math.floor(Date.now() / 1000) : opts.now;
   if (now !== null && BigInt(now) > offer.expiry) fail("expired", "offer has expired");
 
-  return { event, offerHash, offer, signature, terms, binding, status: statusTag as OfferStatus };
+  return { event, offerHash, side, maker, offer, signature, terms, binding, status: statusTag as OfferStatus };
 }
 
 /**
@@ -172,5 +181,6 @@ export async function parseOfferEvent(event: Event, opts: ParseOptions = {}): Pr
  * (or bumpNonce to cancel everything).
  */
 export function buildCancelEvent(parsed: ParsedOffer, identity: NostrIdentity): VerifiedEvent {
-  return buildOfferEvent({ ...parsed, identity, status: "canceled" });
+  const { offer, signature, terms, binding } = parsed;
+  return buildOfferEvent({ offer, signature, terms, binding, identity, status: "canceled" });
 }

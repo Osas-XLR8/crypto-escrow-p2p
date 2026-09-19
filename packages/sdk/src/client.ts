@@ -13,7 +13,7 @@ import {
 } from "viem";
 import { escrowCoreV4Abi } from "./abi/escrowCoreV4.js";
 import { licensedArbitratorAdapterAbi } from "./abi/licensedArbitratorAdapter.js";
-import type { Offer } from "./types.js";
+import { isBuyOffer, type AnyOffer, type Offer } from "./types.js";
 
 export enum TradeState {
   NONE = 0,
@@ -70,17 +70,30 @@ export class EscrowV4Client {
     return this.publicClient.readContract({ address: this.escrow, abi: escrowCoreV4Abi, functionName: "getDispute", args: [tradeId] });
   }
 
-  /** Amount still takeable from an offer, considering cancellation, nonce, expiry, fills and seller balance. */
-  remaining(offer: Offer): Promise<bigint> {
-    return this.publicClient.readContract({ address: this.escrow, abi: escrowCoreV4Abi, functionName: "remaining", args: [offer] });
+  /**
+   * Amount still takeable from an offer, considering cancellation, nonce, expiry and fills — and for a sell
+   * offer the seller's vault balance too (a buy offer is funded by whichever seller takes it).
+   */
+  remaining(offer: AnyOffer): Promise<bigint> {
+    return isBuyOffer(offer)
+      ? this.publicClient.readContract({ address: this.escrow, abi: escrowCoreV4Abi, functionName: "remainingBuy", args: [offer] })
+      : this.publicClient.readContract({ address: this.escrow, abi: escrowCoreV4Abi, functionName: "remaining", args: [offer] });
   }
 
-  onchainOfferHash(offer: Offer): Promise<Hex> {
-    return this.publicClient.readContract({ address: this.escrow, abi: escrowCoreV4Abi, functionName: "hashOffer", args: [offer] });
+  onchainOfferHash(offer: AnyOffer): Promise<Hex> {
+    return isBuyOffer(offer)
+      ? this.publicClient.readContract({ address: this.escrow, abi: escrowCoreV4Abi, functionName: "hashBuyOffer", args: [offer] })
+      : this.publicClient.readContract({ address: this.escrow, abi: escrowCoreV4Abi, functionName: "hashOffer", args: [offer] });
   }
 
+  /** Current offer nonce of a maker (shared by their sell and buy offers). */
+  makerNonce(maker: Address): Promise<bigint> {
+    return this.publicClient.readContract({ address: this.escrow, abi: escrowCoreV4Abi, functionName: "makerNonce", args: [maker] });
+  }
+
+  /** @deprecated use makerNonce */
   sellerNonce(seller: Address): Promise<bigint> {
-    return this.publicClient.readContract({ address: this.escrow, abi: escrowCoreV4Abi, functionName: "sellerNonce", args: [seller] });
+    return this.makerNonce(seller);
   }
 
   freeBalance(seller: Address, token: Address): Promise<bigint> {
@@ -145,6 +158,12 @@ export class EscrowV4Client {
 
   /** Approves exactly `amount` (never unlimited) and deposits it into the seller vault. */
   async deposit(token: Address, amount: bigint) {
+    await this.approveExactly(token, amount);
+    return this.write("deposit", [token, amount]);
+  }
+
+  /** Sets the escrow's allowance to exactly `amount` and waits until the RPC can see it. */
+  private async approveExactly(token: Address, amount: bigint) {
     const { wallet, account, chain } = this.wallet();
     const { request } = await this.publicClient.simulateContract({
       address: token,
@@ -156,12 +175,11 @@ export class EscrowV4Client {
     const approveHash = await wallet.writeContract({ ...request, chain } as never);
     await this.publicClient.waitForTransactionReceipt({ hash: approveHash });
     // Load-balanced public RPCs can answer the next call from a node that hasn't seen the approval yet,
-    // which makes the deposit simulation fail with "transferFrom failed". Wait until the allowance shows.
+    // which makes the following simulation fail with "transferFrom failed". Wait until the allowance shows.
     await waitUntil(async () => {
       const allowance = await this.publicClient.readContract({ address: token, abi: erc20Abi, functionName: "allowance", args: [account.address, this.escrow] });
       return allowance >= amount;
     });
-    return this.write("deposit", [token, amount]);
   }
 
   withdraw(token: Address, amount: bigint) {
@@ -172,13 +190,27 @@ export class EscrowV4Client {
     return this.write("bumpNonce", []);
   }
 
-  cancelOffer(offer: Offer) {
-    return this.write("cancelOffer", [offer]);
+  /** On-chain cancellation of your own offer (either kind): it can never be taken again. */
+  cancelOffer(offer: AnyOffer) {
+    return isBuyOffer(offer) ? this.write("cancelBuyOffer", [offer]) : this.write("cancelOffer", [offer]);
   }
 
-  /** Locks the seller's funds and returns the new trade id. */
-  async takeOffer(offer: Offer, signature: Hex, amount: bigint): Promise<bigint> {
-    const receipt = await this.write("takeOffer", [offer, signature, amount]);
+  /**
+   * Opens a trade from an offer and returns the new trade id. The seller's crypto is locked either way:
+   * - sell offer (you are the buyer): locked from the seller's vault
+   * - buy offer (you are the seller): locked from your vault first, the shortfall from your wallet —
+   *   this approves exactly that shortfall (never an unlimited allowance) before taking.
+   */
+  async takeOffer(offer: AnyOffer, signature: Hex, amount: bigint): Promise<bigint> {
+    let receipt;
+    if (isBuyOffer(offer)) {
+      const { account } = this.wallet();
+      const free = await this.freeBalance(account.address, offer.token);
+      if (free < amount) await this.approveExactly(offer.token, amount - free);
+      receipt = await this.write("takeBuyOffer", [offer, signature, amount]);
+    } else {
+      receipt = await this.write("takeOffer", [offer, signature, amount]);
+    }
     const [opened] = parseEventLogs({ abi: escrowCoreV4Abi, eventName: "TradeOpened", logs: receipt.logs });
     if (!opened) throw new Error("TradeOpened event not found");
     return opened.args.tradeId;

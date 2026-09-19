@@ -1,10 +1,10 @@
 {
   "chainId": 84532,
-  "deployBlock": 47008466,
-  "escrow": "0x140b45C906b76822e25a2FF35F105E9520ddB31c",
-  "fallbackArbitrator": "0x3eA5E1f0EdE8aCfe3723C35106532d495fCa510e",
+  "deployBlock": 47028867,
+  "escrow": "0x04269a86771E230eb10F6C2736284FCB166E33f7",
+  "fallbackArbitrator": "0x6E0031139cE3A0b0753e3e40080180a59804e3B7",
   "firmFee": 500000000000000,
-  "primaryArbitrator": "0x8E8B0B02C70596a3D5adc7f64d242872187355a2",
+  "primaryArbitrator": "0xa2A713056Ce1280140EEaB2db0F819e6Cb4C7462",
   "tokenFaucet": true,
-  "usdt": "0xF40db002cd56f88a0B1e1DCA7ed762d8d1fAD881"
+  "usdt": "0x108b802F52c26b962A55576a74A14A52094ac790"
 }

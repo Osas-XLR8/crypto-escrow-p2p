@@ -2,9 +2,11 @@
 //
 // Payment details (bank account, mobile money number) travel ONLY between buyer and seller.
 // Gift wrapping (NIP-59) also hides who is talking to whom and when from relays.
-// EscrowX servers are never in this path.
+// Every message is also sealed to the sender (NIP-17 practice), so your own side of the conversation
+// survives reloads and appears on your other devices. EscrowX servers are never in this path.
 
 import { wrapEvent, unwrapEvent } from "nostr-tools/nip17";
+import { getPublicKey } from "nostr-tools/pure";
 import type { Event } from "nostr-tools";
 import type { SimplePool } from "nostr-tools/pool";
 import type { Address } from "viem";
@@ -20,12 +22,18 @@ export type TradeMessage =
   | { type: "hello"; tradeId: string; binding: WalletBinding }
   /** Seller → buyer. Never published anywhere else. */
   | { type: "payment_details"; tradeId: string; method: string; instructions: string; payeeName?: string }
+  /** Buyer → seller, alongside the on-chain markPaid: an optional transfer reference to look for. */
+  | { type: "payment_sent"; tradeId: string; reference?: string }
   | { type: "text"; tradeId: string; text: string };
 
 export interface ReceivedMessage {
+  /** Gift-wrap event id (unique per copy; use for de-duplication). */
+  id: string;
   from: string; // sender Nostr pubkey (authenticated by the seal signature)
   createdAt: number;
   message: TradeMessage;
+  /** Sent by me (my own sealed copy). */
+  mine: boolean;
 }
 
 export function tradeIdKey(tradeId: bigint | number | string): string {
@@ -41,6 +49,8 @@ function isTradeMessage(v: unknown): v is TradeMessage {
       return !!m.binding && typeof m.binding === "object";
     case "payment_details":
       return typeof m.method === "string" && typeof m.instructions === "string" && m.instructions.length <= 2000;
+    case "payment_sent":
+      return m.reference === undefined || (typeof m.reference === "string" && m.reference.length <= 500);
     case "text":
       return typeof m.text === "string" && m.text.length <= 4000;
     default:
@@ -64,7 +74,7 @@ export function unwrapTradeMessage(recipient: NostrIdentity, wrap: Event): Recei
     if (body.escrowx !== 1) return null;
     const { escrowx: _v, ...message } = body;
     if (!isTradeMessage(message)) return null;
-    return { from: rumor.pubkey, createdAt: rumor.created_at, message };
+    return { id: wrap.id, from: rumor.pubkey, createdAt: rumor.created_at, message, mine: rumor.pubkey === getPublicKey(recipient.secretKey) };
   } catch {
     return null; // not for us, or tampered
   }
@@ -91,23 +101,54 @@ export class TradeChat {
     private readonly me: NostrIdentity
   ) {}
 
+  /**
+   * Sends to the recipient, plus a copy sealed to myself so the conversation is complete on reload.
+   * Returns how many relays accepted the recipient's copy (throws if none did).
+   */
   async send(recipientPubkey: string, message: TradeMessage): Promise<number> {
     const wrap = wrapTradeMessage(this.me, recipientPubkey, message);
     const results = await Promise.allSettled(this.pool.publish(this.relays, wrap));
     const delivered = results.filter((r) => r.status === "fulfilled").length;
     if (delivered === 0) throw new Error("message was not accepted by any relay");
+    if (recipientPubkey !== this.me.publicKey && message.type !== "hello") {
+      const own = wrapTradeMessage(this.me, this.me.publicKey, message);
+      await Promise.allSettled(this.pool.publish(this.relays, own)); // best effort
+    }
     return delivered;
   }
 
   /** Reads my inbox for a trade. Gift wraps use randomized timestamps, so no `since` filter is used. */
   async inbox(tradeId: bigint | number | string, maxWaitMs = 3000): Promise<ReceivedMessage[]> {
     const id = tradeIdKey(tradeId);
+    return (await this.inboxAll(maxWaitMs)).filter((m) => m.message.tradeId === id);
+  }
+
+  /** Every trade message addressed to me (including my own copies), oldest first. */
+  async inboxAll(maxWaitMs = 3000): Promise<ReceivedMessage[]> {
     const wraps = await this.pool.querySync(this.relays, { kinds: [GIFT_WRAP_KIND], "#p": [this.me.publicKey] }, { maxWait: maxWaitMs });
     const seen = new Set<string>();
     return wraps
       .filter((w) => (seen.has(w.id) ? false : (seen.add(w.id), true)))
       .map((w) => unwrapTradeMessage(this.me, w))
-      .filter((m): m is ReceivedMessage => m !== null && m.message.tradeId === id)
+      .filter((m): m is ReceivedMessage => m !== null)
       .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /**
+   * Live inbox: calls `onMessage` for every trade message addressed to me — stored ones first, then new
+   * ones as they arrive. `onReady` fires once the relays have sent what they had stored. Returns a closer.
+   */
+  subscribe(onMessage: (m: ReceivedMessage) => void, onReady?: () => void): () => void {
+    const seen = new Set<string>();
+    const sub = this.pool.subscribeMany(this.relays, { kinds: [GIFT_WRAP_KIND], "#p": [this.me.publicKey] }, {
+      onevent: (wrap) => {
+        if (seen.has(wrap.id)) return;
+        seen.add(wrap.id);
+        const m = unwrapTradeMessage(this.me, wrap);
+        if (m) onMessage(m);
+      },
+      oneose: () => onReady?.(),
+    });
+    return () => sub.close();
   }
 }

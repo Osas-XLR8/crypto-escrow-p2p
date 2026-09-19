@@ -20,6 +20,7 @@ import {
   adapterKeyFromNostrPubkey,
   buildOfferEvent,
   createBinding,
+  createBuyOffer,
   createOffer,
   decryptEvidence,
   deriveNostrIdentity,
@@ -180,6 +181,68 @@ describe.skipIf(!hasDeployment)("SDK end-to-end on Anvil (no EscrowX servers)", 
     await seller.client.release(tradeId);
     expect((await buyer.client.getTrade(tradeId)).state).toBe(TradeState.RELEASED);
     expect(await usdtBalance(buyer.account.address)).toBe(buyerStart + USDT(250));
+  });
+
+  it("buy offer: buyer posts, seller fills from vault then wallet, chat both ways, paid, released", async () => {
+    const t = { ...terms, escrow: d.escrow, price: "1590", paymentMethods: ["opay"] };
+    const offer = createBuyOffer({
+      buyer: buyer.account.address,
+      token: d.usdt,
+      minAmount: USDT(10),
+      maxAmount: USDT(5_000),
+      totalAmount: USDT(5_000),
+      paymentWindow: 1800n,
+      releaseWindow: 3600n,
+      arbitrator: d.primaryArbitrator,
+      fallbackArbitrator: d.fallbackArbitrator,
+      nonce: await buyer.client.makerNonce(buyer.account.address),
+      expiry: (await chainNow()) + 86400n,
+      terms: t,
+    });
+    const signature = await signOffer(buyer.account, offer, t.chainId, t.escrow);
+    await book.publish(buildOfferEvent({ offer, signature, terms: t, binding: buyer.binding, identity: buyer.identity }));
+
+    // Sellers browse buy offers by side; the buyer is the verified maker.
+    const { offers } = await book.fetch({ chainId: 31337, side: "buy", maker: buyer.account.address });
+    const parsed = offers.find((o) => o.offerHash === hashOffer(offer, t.chainId, t.escrow))!;
+    expect(parsed.side).toBe("buy");
+    expect(await seller.client.remaining(parsed.offer)).toBe(USDT(5_000));
+    expect(await seller.client.onchainOfferHash(parsed.offer)).toBe(parsed.offerHash);
+
+    // Seller fills more than their vault holds: the vault is used first, only the shortfall comes from the wallet.
+    const free = await seller.client.freeBalance(seller.account.address, d.usdt);
+    const amount = free + USDT(100);
+    const walletBefore = await usdtBalance(seller.account.address);
+    const buyerStart = await usdtBalance(buyer.account.address);
+    const tradeId = await seller.client.takeOffer(parsed.offer, parsed.signature, amount);
+
+    const trade = await seller.client.getTrade(tradeId);
+    expect([trade.seller, trade.buyer, trade.state]).toEqual([seller.account.address, buyer.account.address, TradeState.LOCKED]);
+    expect(walletBefore - (await usdtBalance(seller.account.address))).toBe(USDT(100));
+    expect(await seller.client.freeBalance(seller.account.address, d.usdt)).toBe(0n);
+    expect(await seller.client.remaining(parsed.offer)).toBe(USDT(5_000) - amount);
+
+    // The taker (seller) introduces themselves to the maker's bound key; the buyer checks it against trade.seller.
+    const relayUrls = relays.map((r) => r.url);
+    const sellerChat = new TradeChat(pool, relayUrls, seller.identity);
+    const buyerChat = new TradeChat(pool, relayUrls, buyer.identity);
+    await sellerChat.send(parsed.event.pubkey, { type: "hello", tradeId: tradeId.toString(), binding: seller.binding });
+    await sellerChat.send(parsed.event.pubkey, { type: "payment_details", tradeId: tradeId.toString(), method: "opay", instructions: "Opay 8123456789" });
+    const inbox = await buyerChat.inbox(tradeId);
+    const hello = inbox.find((m) => m.message.type === "hello")!;
+    expect(await verifyHello(hello, trade.seller)).toBe(true);
+    expect(inbox.find((m) => m.message.type === "payment_details")?.from).toBe(hello.from);
+
+    // Buyer pays, tells the seller the reference, and the seller sees it next to their own message.
+    await buyer.client.markPaid(tradeId, (await encryptEvidence(new TextEncoder().encode("Opay ref OPY-99"))).commitment);
+    await buyerChat.send(hello.from, { type: "payment_sent", tradeId: tradeId.toString(), reference: "OPY-99" });
+    const sellerThread = await sellerChat.inbox(tradeId);
+    expect(sellerThread.some((m) => m.mine && m.message.type === "payment_details")).toBe(true);
+    expect(sellerThread.some((m) => !m.mine && m.message.type === "payment_sent")).toBe(true);
+
+    await seller.client.release(tradeId);
+    expect(await usdtBalance(buyer.account.address)).toBe(buyerStart + amount);
+    await seller.client.deposit(d.usdt, USDT(2_000)); // restore the vault for later tests
   });
 
   it("dispute: evidence sealed to the assigned licensed-firm panelist, ruling executes on-chain", async () => {

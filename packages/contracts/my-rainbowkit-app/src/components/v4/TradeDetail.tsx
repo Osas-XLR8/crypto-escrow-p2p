@@ -25,8 +25,10 @@ import { Addr, Button, Card, Field, KV, Notice, TxLink, errorText } from "@/comp
 import { MessagingGate } from "@/components/v4/MessagingGate";
 import { TradeChatPanel } from "@/components/v4/TradeChatPanel";
 import { fmtDuration, fmtTs, shortAddr, shortHash } from "@/lib/format";
-import { downloadBytes, findTradeTerms, fmtFiat, fmtToken, loadEvidence, recallTradeTerms, rememberTradeTerms, storeEvidence } from "@/lib/v4/local";
-import { CANCEL_REASONS, RELEASE_REASONS, type TradeSummary } from "@/lib/v4/tradeIndex";
+import { useMessages } from "@/context/Messages";
+import { describeEvent } from "@/lib/v4/describe";
+import { downloadBytes, findTradeOffer, fmtFiat, fmtToken, loadEvidence, recallTradeTerms, rememberTradeTerms, storeEvidence, termsFromOffer } from "@/lib/v4/local";
+import type { TradeSummary } from "@/lib/v4/tradeIndex";
 
 const SYM = V4.tokenSymbol;
 
@@ -37,20 +39,24 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   onChanged: () => void;
 }) {
   const { address, client, book, identity } = useEscrowX();
+  const messages = useMessages();
   const publicClient = usePublicClient();
   const id = summary.tradeId;
   const opened = summary.events.find((e) => e.name === "TradeOpened");
 
-  // Price and currency live in the seller's signed offer, not on-chain: remembered at purchase, else looked up on relays.
+  // Price and currency live in the signed offer, not on-chain: remembered when the trade opened, else found on
+  // the relays by the trade's on-chain offer hash.
   const terms = useQuery({
     queryKey: ["tradeTerms", id.toString()],
     enabled: !!book && !!opened,
     staleTime: Infinity,
     queryFn: async () => {
       const known = recallTradeTerms(id);
-      if (known) return known;
-      const found = await findTradeTerms(book!, summary.seller as Address, opened!.args.offerHash as string);
-      if (found) rememberTradeTerms(id, found);
+      if (known?.side) return known;
+      const offer = await findTradeOffer(book!, opened!.args.offerHash as string);
+      if (!offer) return known;
+      const found = termsFromOffer(offer);
+      rememberTradeTerms(id, found);
       return found;
     },
   });
@@ -87,6 +93,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   const [message, setMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [confirmedFiat, setConfirmedFiat] = useState(false);
   const [receipt, setReceipt] = useState<File | null>(null);
+  const [reference, setReference] = useState("");
 
   async function run(label: string, fn: () => Promise<unknown>, ok: string) {
     setBusy(label);
@@ -150,6 +157,10 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
       commitment = ev.commitment;
     }
     await client!.markPaid(id, commitment);
+    // Tell the seller privately (best effort — the on-chain record is what counts).
+    if (messages.peer(id)) {
+      await messages.send(id, { type: "payment_sent", ...(reference.trim() ? { reference: reference.trim() } : {}) }).catch(() => {});
+    }
   }
 
   const actions: ReactNode[] = [];
@@ -157,6 +168,10 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   if (isBuyer && t.state === TradeState.LOCKED && now <= paymentDeadline) {
     actions.push(
       <ActionBox key="paid" title={fiat ? `Send ${fiat} to the seller, then confirm here` : "Pay the seller, then confirm here"} note={`Due ${countdown(paymentDeadline)}. The seller's details are in the private chat below.`}>
+        <Field label="Transfer reference" hint="optional · sent privately to the seller"
+          help={identity ? "Helps the seller find your payment in their banking app." : "Unlock messaging below to send the seller a reference with it."}>
+          <input className="input mono" value={reference} onChange={(e) => setReference(e.target.value)} placeholder="e.g. OPY-7731-2026" maxLength={200} disabled={!identity} />
+        </Field>
         <Field label="Receipt or bank statement" hint="optional, strongly recommended"
           help="Encrypted on this device. Only its fingerprint goes on-chain; nobody can open it unless you share the key with a dispute arbitrator.">
           <input className="file" type="file" accept="image/*,application/pdf" onChange={(e) => setReceipt(e.target.files?.[0] ?? null)} />
@@ -292,8 +307,9 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
     : t.state === TradeState.DISPUTED ? { label: d.escalated ? "Can be closed" : "Can escalate", at: d.escalated ? terminalAt : escalateAt }
     : null;
 
-  const roleLine = isBuyer ? <>You&apos;re <strong>buying</strong> from <Addr address={t.seller} /></>
-    : isSeller ? <>You&apos;re <strong>selling</strong> to <Addr address={t.buyer} /></>
+  const fromBuyOffer = terms.data?.side === "buy";
+  const roleLine = isBuyer ? <>You&apos;re <strong>buying</strong> from <Addr address={t.seller} />{fromBuyOffer ? " · they filled your buy offer" : ""}</>
+    : isSeller ? <>You&apos;re <strong>selling</strong> to <Addr address={t.buyer} />{fromBuyOffer ? " · you filled their buy offer" : ""}</>
     : <><Addr address={t.seller} /> → <Addr address={t.buyer} /></>;
 
   const kvRows: [ReactNode, ReactNode][] = [
@@ -365,7 +381,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
       )}
 
       {/* A finished trade needs no chat; only show its history if messaging is already unlocked. */}
-      {(open || identity) && <TradeChatPanel tradeId={id} seller={t.seller} buyer={t.buyer} />}
+      {(open || identity) && <TradeChatPanel summary={summary} />}
 
       <Timeline summary={summary} />
     </div>
@@ -501,21 +517,6 @@ function EvidenceCard({ tradeId, isBuyer, panelistKey, assignee, onSubmitted }: 
 // ─── Timeline ─────────────────────────────────────────────────────────────────
 
 function Timeline({ summary }: { summary: TradeSummary }) {
-  const describe = (name: string, args: Record<string, unknown>): string => {
-    switch (name) {
-      case "TradeOpened": return `Buyer locked ${fmtToken(args.amount as bigint)} ${SYM} from the seller's vault`;
-      case "PaymentMarked": return (args.evidenceCommitment as string) === zeroHash ? "Buyer marked the payment as sent" : `Buyer marked the payment as sent · receipt fingerprint ${shortHash(args.evidenceCommitment as string)}`;
-      case "DisputeRequested": return `Dispute opened by ${shortAddr(args.opener as string)} (fee ${formatEther(args.feePaid as bigint)} ETH)`;
-      case "ArbitrationFeePaid": return `${shortAddr(args.party as string)} matched the arbitration fee`;
-      case "DisputeCreated": return `Case #${args.disputeId} created with ${arbitratorName(args.arbitrator as string)}`;
-      case "Escalated": return `Escalated to ${arbitratorName(args.fallbackArbitrator as string)}`;
-      case "Evidence": return `${shortAddr(args.party as string)} submitted sealed evidence`;
-      case "FeesSettled": return `Dispute fees settled (buyer ${formatEther(args.toBuyer as bigint)} ETH, seller ${formatEther(args.toSeller as bigint)} ETH)`;
-      case "Released": return `${fmtToken(args.amount as bigint)} ${SYM} released to the buyer · ${RELEASE_REASONS[Number(args.reason)] ?? ""}`;
-      case "Cancelled": return `Crypto returned to the seller · ${CANCEL_REASONS[Number(args.reason)] ?? ""}`;
-      default: return name;
-    }
-  };
   return (
     <Card title="On-chain record" sub="Every step, read straight from the escrow contract.">
       <ol className="timeline">
@@ -523,7 +524,7 @@ function Timeline({ summary }: { summary: TradeSummary }) {
           <li key={`${e.txHash}-${e.logIndex}`}>
             <span className="node" aria-hidden />
             <div className="stack-xs">
-              <span className="small">{describe(e.name, e.args)}</span>
+              <span className="small">{describeEvent(e)}</span>
               <span className="tiny faint">
                 {e.timestamp ? fmtTs(e.timestamp) : "—"} · block <span className="mono">{e.blockNumber.toString()}</span> · <TxLink hash={e.txHash} />
               </span>

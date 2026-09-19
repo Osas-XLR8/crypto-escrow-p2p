@@ -11,6 +11,7 @@ import { RainbowKitProvider, darkTheme, lightTheme } from "@rainbow-me/rainbowki
 import { wagmiConfig } from "../wagmi";
 import { EscrowXProvider } from "@/context/EscrowX";
 import { ThemeProvider, useTheme } from "@/context/Theme";
+import { ToastsProvider } from "@/context/Toasts";
 
 const queryClient = new QueryClient();
 
@@ -22,7 +23,9 @@ function Providers({ children }: { children: React.ReactNode }) {
   const { resolved } = useTheme();
   return (
     <RainbowKitProvider theme={resolved === "dark" ? rkDark : rkLight} modalSize="compact">
-      <EscrowXProvider>{children}</EscrowXProvider>
+      <ToastsProvider>
+        <EscrowXProvider>{children}</EscrowXProvider>
+      </ToastsProvider>
     </RainbowKitProvider>
   );
 }

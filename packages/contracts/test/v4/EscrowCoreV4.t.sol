@@ -152,25 +152,25 @@ contract EscrowCoreV4Test is V4TestBase {
 
         bytes memory wrongKey = _sign(0xBAD, escrow.hashOffer(o));
         vm.prank(buyer);
-        vm.expectRevert("invalid seller signature");
+        vm.expectRevert("invalid maker signature");
         escrow.takeOffer(o, wrongKey, 100 * U);
 
         // Signed one offer, submitted a better one for the buyer.
         bytes memory sig = _signOffer(escrow, o);
         o.maxAmount = 5_000 * U;
         vm.prank(buyer);
-        vm.expectRevert("invalid seller signature");
+        vm.expectRevert("invalid maker signature");
         escrow.takeOffer(o, sig, 2_000 * U);
         o.maxAmount = 1_000 * U;
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(sellerPk, escrow.hashOffer(o));
         bytes memory highS = abi.encodePacked(r, bytes32(SECP256K1_N - uint256(s)), v == 27 ? uint8(28) : uint8(27));
         vm.prank(buyer);
-        vm.expectRevert("invalid seller signature");
+        vm.expectRevert("invalid maker signature");
         escrow.takeOffer(o, highS, 100 * U);
 
         vm.prank(buyer);
-        vm.expectRevert("invalid seller signature");
+        vm.expectRevert("invalid maker signature");
         escrow.takeOffer(o, hex"1234", 100 * U);
     }
 
@@ -186,7 +186,7 @@ contract EscrowCoreV4Test is V4TestBase {
         vm.stopPrank();
 
         vm.prank(seller);
-        vm.expectRevert("seller cannot take own offer");
+        vm.expectRevert("cannot take own offer");
         escrow.takeOffer(o, sig, 100 * U);
 
         vm.warp(o.expiry + 1);
@@ -291,12 +291,12 @@ contract EscrowCoreV4Test is V4TestBase {
         other.deposit(address(usdt), 1_000 * U);
         vm.stopPrank();
         vm.prank(buyer);
-        vm.expectRevert("invalid seller signature");
+        vm.expectRevert("invalid maker signature");
         other.takeOffer(o, sig, 100 * U);
 
         vm.chainId(999);
         vm.prank(buyer);
-        vm.expectRevert("invalid seller signature");
+        vm.expectRevert("invalid maker signature");
         escrow.takeOffer(o, sig, 100 * U);
     }
 

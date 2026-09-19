@@ -15,7 +15,8 @@ A minimal, investor-safe P2P escrow demo:
 - **Foundry tests** (basic + negative suite)
 - **Local dev scripts** (deploy + smoke tests)
 - **Client SDK** (`packages/sdk`): signed offers on Nostr relays, end-to-end encrypted trade chat, encrypted dispute evidence, typed v4 contract client
-- **Next.js web app** (RainbowKit/Wagmi): v4 reference client — relay order book, encrypted chat, disputes.
+- **Next.js web app** (RainbowKit/Wagmi): v4 reference client — two-sided relay order book (buy and sell offers),
+  encrypted trade chat with on-chain milestones and notifications, disputes, arbitration desk.
   Builds to a static site; deploys to Base Sepolia + GitHub Pages (see [the app README](packages/contracts/my-rainbowkit-app/README.md#run-it))
 
 ## Quick Demo (Local)

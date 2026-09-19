@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { finalizeEvent, generateSecretKey } from "nostr-tools/pure";
 import { SimplePool } from "nostr-tools/pool";
 import { OfferBook, TradeChat, buildCancelEvent, buildOfferEvent, parseOfferEvent, type ParsedOffer } from "../../src/index.js";
-import { CHAIN_ID, party, signedOffer, terms } from "../support/fixtures.js";
+import { CHAIN_ID, party, signedBuyOffer, signedOffer, terms } from "../support/fixtures.js";
 import { startTestRelay, type TestRelay } from "../support/testRelay.js";
 
 let relayA: TestRelay;
@@ -36,7 +36,7 @@ describe("OfferBook over relays", () => {
 
     const { offers, rejected } = await book.fetch({ chainId: CHAIN_ID, fiatCurrency: "NGN" });
     expect(rejected).toEqual([]);
-    expect(offers.map((o) => o.offer.seller)).toEqual([ngn.account.address]);
+    expect(offers.map((o) => o.maker)).toEqual([ngn.account.address]);
 
     // Offers survive a relay going away: relay B alone still serves them.
     const onlyB = await new OfferBook([relayB.url], {}, pool).fetch({ chainId: CHAIN_ID, fiatCurrency: "KES" });
@@ -55,8 +55,21 @@ describe("OfferBook over relays", () => {
     await book.publish(buildOfferEvent({ ...otherChain, binding: elsewhere.binding, identity: elsewhere.identity }));
 
     const { offers, rejected } = await book.fetch({ chainId: CHAIN_ID, fiatCurrency: "INR" });
-    expect(offers.map((o) => o.offer.seller)).toEqual([here.account.address]);
+    expect(offers.map((o) => o.maker)).toEqual([here.account.address]);
     expect(rejected).toEqual([]); // another deployment's offer is not a forgery
+  });
+
+  it("separates buy offers from sell offers by side", async () => {
+    const book = new OfferBook([relayA.url], {}, pool);
+    const seller = await party();
+    const buyer = await party();
+    await book.publish(buildOfferEvent({ ...(await signedOffer(seller, terms({ fiatCurrency: "UGX", price: "3700" }))), binding: seller.binding, identity: seller.identity }));
+    await book.publish(buildOfferEvent({ ...(await signedBuyOffer(buyer, terms({ fiatCurrency: "UGX", price: "3650" }))), binding: buyer.binding, identity: buyer.identity }));
+
+    const buys = await book.fetch({ chainId: CHAIN_ID, fiatCurrency: "UGX", side: "buy" });
+    expect(buys.offers.map((o) => [o.side, o.maker])).toEqual([["buy", buyer.account.address]]);
+    const mine = await book.fetch({ chainId: CHAIN_ID, maker: buyer.account.address });
+    expect(mine.offers).toHaveLength(1);
   });
 
   it("filters out forged offers instead of trusting the relay", async () => {
@@ -95,7 +108,7 @@ describe("OfferBook over relays", () => {
     });
     await new Promise((r) => setTimeout(r, 200)); // let the subscription register
     await book.publish(buildOfferEvent({ ...(await signedOffer(seller, terms({ fiatCurrency: "BRL", price: "5.4" }))), binding: seller.binding, identity: seller.identity }));
-    expect((await received).offer.seller).toBe(seller.account.address);
+    expect((await received).maker).toBe(seller.account.address);
   });
 });
 
@@ -121,6 +134,31 @@ describe("TradeChat over relays", () => {
 
     expect(await new TradeChat(pool, [relayA.url], eve.identity).inbox(42n)).toEqual([]);
     expect(relayA.events.some((e) => e.content.includes("2200110033"))).toBe(false); // relay never sees plaintext
+  });
+
+  it("keeps both sides of the conversation, and streams new messages live", async () => {
+    const seller = await party();
+    const buyer = await party();
+    const sellerChat = new TradeChat(pool, [relayA.url], seller.identity);
+    const buyerChat = new TradeChat(pool, [relayA.url], buyer.identity);
+
+    const live: string[] = [];
+    let ready = false;
+    const close = sellerChat.subscribe((m) => live.push(`${m.mine ? "me" : "them"}:${m.message.type}`), () => (ready = true));
+    await new Promise((r) => setTimeout(r, 200));
+    expect(ready).toBe(true);
+
+    await buyerChat.send(seller.identity.publicKey, { type: "payment_sent", tradeId: "77", reference: "OPY-1234" });
+    await new Promise((r) => setTimeout(r, 1100)); // message timestamps have one-second resolution
+    await sellerChat.send(buyer.identity.publicKey, { type: "text", tradeId: "77", text: "Got it, checking my app" });
+    await new Promise((r) => setTimeout(r, 200));
+    close();
+    expect(live).toEqual(["them:payment_sent", "me:text"]);
+
+    // The buyer sees their own message (sealed copy) and the seller's reply.
+    const thread = await buyerChat.inbox(77n);
+    expect(thread.map((m) => [m.mine, m.message.type])).toEqual([[true, "payment_sent"], [false, "text"]]);
+    expect(relayA.events.some((e) => e.content.includes("OPY-1234"))).toBe(false);
   });
 
   it("fails loudly when no relay accepts the message", async () => {

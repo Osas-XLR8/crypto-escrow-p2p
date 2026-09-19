@@ -10,7 +10,7 @@ import {
   type Hex,
   type PublicClient,
 } from "viem";
-import type { Offer, OfferTerms, TypedDataSigner } from "./types.js";
+import { isBuyOffer, offerMaker, type AnyOffer, type BuyOffer, type Offer, type OfferTerms, type TypedDataSigner } from "./types.js";
 
 export const OFFER_TYPES = {
   Offer: [
@@ -30,6 +30,29 @@ export const OFFER_TYPES = {
   ],
 } as const;
 
+export const BUY_OFFER_TYPES = {
+  BuyOffer: [
+    { name: "buyer", type: "address" },
+    { name: "token", type: "address" },
+    { name: "minAmount", type: "uint256" },
+    { name: "maxAmount", type: "uint256" },
+    { name: "totalAmount", type: "uint256" },
+    { name: "paymentWindow", type: "uint64" },
+    { name: "releaseWindow", type: "uint64" },
+    { name: "arbitrator", type: "address" },
+    { name: "fallbackArbitrator", type: "address" },
+    { name: "termsHash", type: "bytes32" },
+    { name: "nonce", type: "uint256" },
+    { name: "expiry", type: "uint64" },
+    { name: "salt", type: "bytes32" },
+  ],
+} as const;
+
+const typedFor = (offer: AnyOffer) =>
+  isBuyOffer(offer)
+    ? ({ types: BUY_OFFER_TYPES, primaryType: "BuyOffer" } as const)
+    : ({ types: OFFER_TYPES, primaryType: "Offer" } as const);
+
 /** Bounds enforced by EscrowCoreV4; checked client-side so invalid offers are never published. */
 export const WINDOW_BOUNDS = {
   paymentWindow: { min: 10n * 60n, max: 3n * 3600n },
@@ -42,9 +65,12 @@ export function offerDomain(chainId: number, escrow: Address) {
   return { name: "EscrowX", version: "4", chainId, verifyingContract: escrow } as const;
 }
 
-/** Same digest as EscrowCoreV4.hashOffer(offer). Also used as the offer's public id. */
-export function hashOffer(offer: Offer, chainId: number, escrow: Address): Hex {
-  return hashTypedData({ domain: offerDomain(chainId, escrow), types: OFFER_TYPES, primaryType: "Offer", message: offer });
+/**
+ * Same digest as EscrowCoreV4.hashOffer (sell offers) or hashBuyOffer (buy offers). Also the offer's public id.
+ * The two kinds are distinct EIP-712 types, so their hashes (and signatures) never collide.
+ */
+export function hashOffer(offer: AnyOffer, chainId: number, escrow: Address): Hex {
+  return hashTypedData({ domain: offerDomain(chainId, escrow), ...typedFor(offer), message: offer } as never);
 }
 
 // ─── Terms ────────────────────────────────────────────────────────────────────
@@ -124,11 +150,20 @@ export function createOffer(p: CreateOfferParams): Offer {
   };
 }
 
-export async function signOffer(signer: TypedDataSigner, offer: Offer, chainId: number, escrow: Address): Promise<Hex> {
+export type CreateBuyOfferParams = Omit<CreateOfferParams, "seller"> & { buyer: Address };
+
+/** Builds a buy offer (the buyer is the maker) that satisfies every static check EscrowCoreV4.takeBuyOffer performs. */
+export function createBuyOffer(p: CreateBuyOfferParams): BuyOffer {
+  const { buyer, ...rest } = p;
+  const { seller: _maker, ...fields } = createOffer({ ...rest, seller: buyer });
+  return { buyer, ...fields };
+}
+
+/** Signs a sell offer (as the seller) or a buy offer (as the buyer). */
+export async function signOffer(signer: TypedDataSigner, offer: AnyOffer, chainId: number, escrow: Address): Promise<Hex> {
   return signer.signTypedData({
     domain: offerDomain(chainId, escrow),
-    types: OFFER_TYPES,
-    primaryType: "Offer",
+    ...typedFor(offer),
     message: offer as unknown as Record<string, unknown>,
   });
 }
@@ -140,7 +175,7 @@ export async function signOffer(signer: TypedDataSigner, offer: Offer, chainId: 
  * High-s signatures are rejected because EscrowCoreV4 rejects them.
  */
 export async function verifyOfferSignature(
-  offer: Offer,
+  offer: AnyOffer,
   signature: Hex,
   chainId: number,
   escrow: Address,
@@ -151,16 +186,15 @@ export async function verifyOfferSignature(
     if (s > SECP256K1_HALF_N) return false;
   }
   const args = {
-    address: offer.seller,
+    address: offerMaker(offer),
     domain: offerDomain(chainId, escrow),
-    types: OFFER_TYPES,
-    primaryType: "Offer" as const,
+    ...typedFor(offer),
     message: offer,
     signature,
   };
   try {
     // Cast: the client overload set (block-tag variants) does not narrow from this literal.
-    return publicClient ? await publicClient.verifyTypedData(args as never) : await verifyTypedData(args);
+    return publicClient ? await publicClient.verifyTypedData(args as never) : await verifyTypedData(args as never);
   } catch {
     return false;
   }
@@ -168,19 +202,21 @@ export async function verifyOfferSignature(
 
 // ─── JSON transport (bigint-safe) ─────────────────────────────────────────────
 
-export type SerializedOffer = { [K in keyof Offer]: string };
+export type SerializedOffer = { [K in keyof Offer]: string } | { [K in keyof BuyOffer]: string };
 
 const BIGINT_FIELDS = ["minAmount", "maxAmount", "totalAmount", "paymentWindow", "releaseWindow", "nonce", "expiry"] as const;
 
-export function serializeOffer(offer: Offer): SerializedOffer {
+export function serializeOffer(offer: AnyOffer): SerializedOffer {
   const out = {} as SerializedOffer;
   for (const [k, v] of Object.entries(offer)) (out as Record<string, string>)[k] = typeof v === "bigint" ? v.toString() : String(v);
   return out;
 }
 
-export function deserializeOffer(raw: unknown): Offer {
+/** Parses either kind; a `buyer` field means a buy offer, a `seller` field a sell offer (never both). */
+export function deserializeOffer(raw: unknown): AnyOffer {
   if (!raw || typeof raw !== "object") throw new Error("offer must be an object");
   const r = raw as Record<string, unknown>;
+  if ("buyer" in r === "seller" in r) throw new Error("offer must have exactly one of seller / buyer");
   const addr = (k: string): Address => {
     const v = r[k];
     if (typeof v !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(v)) throw new Error(`offer.${k} must be an address`);
@@ -196,8 +232,9 @@ export function deserializeOffer(raw: unknown): Offer {
     if (typeof v !== "string" || !/^\d{1,78}$/.test(v)) throw new Error(`offer.${k} must be a decimal integer string`);
     return BigInt(v);
   };
+  const maker = "buyer" in r ? { buyer: addr("buyer") } : { seller: addr("seller") };
   return {
-    seller: addr("seller"),
+    ...maker,
     token: addr("token"),
     minAmount: uint("minAmount"),
     maxAmount: uint("maxAmount"),
@@ -210,5 +247,5 @@ export function deserializeOffer(raw: unknown): Offer {
     nonce: uint("nonce"),
     expiry: uint("expiry"),
     salt: b32("salt"),
-  };
+  } as AnyOffer;
 }

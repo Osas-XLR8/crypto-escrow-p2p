@@ -41,6 +41,19 @@ export const escrowCoreV4Abi = [
   },
   {
     "type": "function",
+    "name": "BUY_OFFER_TYPEHASH",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "FEE_TIMEOUT",
     "inputs": [],
     "outputs": [
@@ -242,6 +255,86 @@ export const escrowCoreV4Abi = [
         "name": "tradeId",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "cancelBuyOffer",
+    "inputs": [
+      {
+        "name": "offer",
+        "type": "tuple",
+        "internalType": "struct EscrowCoreV4.BuyOffer",
+        "components": [
+          {
+            "name": "buyer",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "minAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "totalAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "paymentWindow",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "releaseWindow",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "arbitrator",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "fallbackArbitrator",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "termsHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "nonce",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "expiry",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "salt",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
       }
     ],
     "outputs": [],
@@ -680,6 +773,92 @@ export const escrowCoreV4Abi = [
   },
   {
     "type": "function",
+    "name": "hashBuyOffer",
+    "inputs": [
+      {
+        "name": "offer",
+        "type": "tuple",
+        "internalType": "struct EscrowCoreV4.BuyOffer",
+        "components": [
+          {
+            "name": "buyer",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "minAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "totalAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "paymentWindow",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "releaseWindow",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "arbitrator",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "fallbackArbitrator",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "termsHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "nonce",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "expiry",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "salt",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "hashOffer",
     "inputs": [
       {
@@ -760,6 +939,25 @@ export const escrowCoreV4Abi = [
         "name": "",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "makerNonce",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -934,6 +1132,92 @@ export const escrowCoreV4Abi = [
   },
   {
     "type": "function",
+    "name": "remainingBuy",
+    "inputs": [
+      {
+        "name": "offer",
+        "type": "tuple",
+        "internalType": "struct EscrowCoreV4.BuyOffer",
+        "components": [
+          {
+            "name": "buyer",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "minAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "totalAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "paymentWindow",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "releaseWindow",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "arbitrator",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "fallbackArbitrator",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "termsHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "nonce",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "expiry",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "salt",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "rule",
     "inputs": [
       {
@@ -949,25 +1233,6 @@ export const escrowCoreV4Abi = [
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "sellerNonce",
-    "inputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -1005,6 +1270,102 @@ export const escrowCoreV4Abi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "takeBuyOffer",
+    "inputs": [
+      {
+        "name": "buyOffer",
+        "type": "tuple",
+        "internalType": "struct EscrowCoreV4.BuyOffer",
+        "components": [
+          {
+            "name": "buyer",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "minAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "totalAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "paymentWindow",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "releaseWindow",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "arbitrator",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "fallbackArbitrator",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "termsHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "nonce",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "expiry",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "salt",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
+      },
+      {
+        "name": "signature",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "tradeId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -1388,7 +1749,7 @@ export const escrowCoreV4Abi = [
     "name": "NonceBumped",
     "inputs": [
       {
-        "name": "seller",
+        "name": "maker",
         "type": "address",
         "indexed": true,
         "internalType": "address"
@@ -1413,7 +1774,7 @@ export const escrowCoreV4Abi = [
         "internalType": "bytes32"
       },
       {
-        "name": "seller",
+        "name": "maker",
         "type": "address",
         "indexed": true,
         "internalType": "address"

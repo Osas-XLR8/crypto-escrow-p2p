@@ -4,11 +4,17 @@
 import { SimplePool } from "nostr-tools/pool";
 import type { Event, Filter } from "nostr-tools";
 import { OFFER_EVENT_KIND, OfferEventError, PROTOCOL_TAG, parseOfferEvent, type ParseOptions, type ParsedOffer } from "./offerEvents.js";
+import type { OfferSide } from "./types.js";
 
 export interface OfferQuery {
   chainId: number;
   fiatCurrency?: string;
-  seller?: string; // wallet address, filtered after verification
+  /** "sell" offers are what buyers browse; "buy" offers are what sellers browse. Both when omitted. */
+  side?: OfferSide;
+  /** Wallet address of the offer's maker, filtered after verification. */
+  maker?: string;
+  /** @deprecated use `maker` */
+  seller?: string;
   limit?: number;
 }
 
@@ -41,6 +47,7 @@ export class OfferBook {
    */
   filter(q: OfferQuery): Filter {
     const f: Filter = { kinds: [OFFER_EVENT_KIND], "#y": [PROTOCOL_TAG] };
+    if (q.side) f["#k"] = [q.side];
     if (q.fiatCurrency) f["#f"] = [q.fiatCurrency];
     if (q.limit) f.limit = q.limit;
     return f;
@@ -71,7 +78,9 @@ export class OfferBook {
     for (const event of events) {
       try {
         const parsed = await parseOfferEvent(event, { ...this.parseOptions, chainId: q.chainId });
-        if (q.seller && parsed.offer.seller.toLowerCase() !== q.seller.toLowerCase()) continue;
+        const maker = q.maker ?? q.seller;
+        if (maker && parsed.maker.toLowerCase() !== maker.toLowerCase()) continue;
+        if (q.side && parsed.side !== q.side) continue;
         // Addressable-event semantics: newest event per (author, offer hash) wins.
         const key = `${event.pubkey}:${parsed.offerHash}`;
         const prev = latest.get(key);
@@ -93,7 +102,9 @@ export class OfferBook {
       onevent: (event) => {
         parseOfferEvent(event, { ...this.parseOptions, chainId: q.chainId })
           .then((parsed) => {
-            if (q.seller && parsed.offer.seller.toLowerCase() !== q.seller.toLowerCase()) return;
+            const maker = q.maker ?? q.seller;
+            if (maker && parsed.maker.toLowerCase() !== maker.toLowerCase()) return;
+            if (q.side && parsed.side !== q.side) return;
             onOffer(parsed);
           })
           .catch((e) => {

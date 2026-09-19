@@ -1,7 +1,7 @@
 // test/support/fixtures.ts
 import { privateKeyToAccount, generatePrivateKey, type PrivateKeyAccount } from "viem/accounts";
 import type { Address } from "viem";
-import { createBinding, createOffer, deriveNostrIdentity, signOffer, type NostrIdentity, type Offer, type OfferTerms, type WalletBinding } from "../../src/index.js";
+import { createBinding, createBuyOffer, createOffer, deriveNostrIdentity, signOffer, type BuyOffer, type NostrIdentity, type Offer, type OfferTerms, type WalletBinding } from "../../src/index.js";
 
 export const CHAIN_ID = 31337;
 export const ESCROW = "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9" as Address;
@@ -52,5 +52,26 @@ export async function signedOffer(seller: Party, t: OfferTerms = terms(), overri
     ...overrides,
   });
   const signature = await signOffer(seller.account, offer, t.chainId, t.escrow);
+  return { offer, signature, terms: t };
+}
+
+/** A buyer-signed buy offer (the buyer is the maker). */
+export async function signedBuyOffer(buyer: Party, t: OfferTerms = terms(), overrides: Partial<Parameters<typeof createBuyOffer>[0]> = {}) {
+  const offer: BuyOffer = createBuyOffer({
+    buyer: buyer.account.address,
+    token: USDT,
+    minAmount: 10_000_000n,
+    maxAmount: 500_000_000n,
+    totalAmount: 2_000_000_000n,
+    paymentWindow: 1800n,
+    releaseWindow: 3600n,
+    arbitrator: ARB_PRIMARY,
+    fallbackArbitrator: ARB_FALLBACK,
+    nonce: 0n,
+    expiry: BigInt(Math.floor(Date.now() / 1000) + 86400),
+    terms: t,
+    ...overrides,
+  });
+  const signature = await signOffer(buyer.account, offer, t.chainId, t.escrow);
   return { offer, signature, terms: t };
 }

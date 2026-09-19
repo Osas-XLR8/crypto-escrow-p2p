@@ -88,7 +88,7 @@ contract EscrowHandler is Test {
             arbitrator: address(arb),
             fallbackArbitrator: address(arb2),
             termsHash: keccak256("terms"),
-            nonce: escrow.sellerNonce(seller),
+            nonce: escrow.makerNonce(seller),
             expiry: uint64(block.timestamp + 1 days),
             salt: bytes32(++salt)
         });
@@ -96,6 +96,34 @@ contract EscrowHandler is Test {
         (uint8 v, bytes32 r, bytes32 sg) = vm.sign(sellerPks[si], digest);
         vm.prank(buyers[b % buyers.length]);
         escrow.takeOffer(o, abi.encodePacked(r, sg, v), amount);
+    }
+
+    /// @dev A seller fills a buyer-signed buy offer: vault first, shortfall pulled from the wallet.
+    function takeBuyOffer(uint256 s, uint256 b, uint256 amount) external {
+        address seller = sellers[s % sellers.length];
+        uint256 bi = b % buyers.length;
+        uint256 available = usdt.balanceOf(seller) + escrow.freeBalance(seller, address(usdt));
+        if (available < 1e6) return;
+        amount = bound(amount, 1e6, available < 5_000e6 ? available : 5_000e6);
+
+        EscrowCoreV4.BuyOffer memory o = EscrowCoreV4.BuyOffer({
+            buyer: buyers[bi],
+            token: address(usdt),
+            minAmount: 1e6,
+            maxAmount: 5_000e6,
+            totalAmount: 20_000e6,
+            paymentWindow: 30 minutes,
+            releaseWindow: 1 hours,
+            arbitrator: address(arb),
+            fallbackArbitrator: address(arb2),
+            termsHash: keccak256("buy terms"),
+            nonce: escrow.makerNonce(buyers[bi]),
+            expiry: uint64(block.timestamp + 1 days),
+            salt: bytes32(++salt)
+        });
+        (uint8 v, bytes32 r, bytes32 sg) = vm.sign(0xB0B0 + bi, escrow.hashBuyOffer(o));
+        vm.prank(seller);
+        escrow.takeBuyOffer(o, abi.encodePacked(r, sg, v), amount);
     }
 
     // ─── Trade lifecycle ──────────────────────────────────────────────────────

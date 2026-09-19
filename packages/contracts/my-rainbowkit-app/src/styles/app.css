@@ -386,3 +386,33 @@ select.input { padding-right: 28px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ── Two-sided market ───────────────────────────────────────────────── */
+.segmented-lg button { height: 34px; padding: 0 16px; font-size: 13.5px; font-weight: 600; }
+
+/* ── Chat thread ────────────────────────────────────────────────────── */
+.chat {
+  display: grid; gap: 8px; align-content: start; max-height: 460px; min-height: 140px; overflow-y: auto;
+  padding: 12px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--border);
+}
+.chat .msg { background: var(--surface); }
+.chat .msg.mine { background: var(--accent-soft); border-color: var(--accent-line); }
+.chat .msg.untrusted { border-color: var(--danger-line); background: var(--danger-soft); }
+.chat .empty { padding: 20px 8px; }
+.chat-system {
+  justify-self: center; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px;
+  max-width: 94%; padding: 6px 10px; border-radius: 999px; font-size: 12px; color: var(--text-2);
+  background: var(--surface); border: 1px dashed var(--border-strong); text-align: center;
+}
+.chat-system a { color: var(--text-3); }
+
+/* ── Toasts ─────────────────────────────────────────────────────────── */
+.toasts { position: fixed; right: 16px; bottom: 16px; z-index: 200; display: grid; gap: 8px; width: min(380px, calc(100vw - 32px)); }
+.toast {
+  display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: 12px;
+  background: var(--surface); border: 1px solid var(--border-strong); box-shadow: 0 8px 30px rgb(0 0 0 / 0.25);
+  border-left: 3px solid var(--info); animation: toast-in .18s ease-out;
+}
+.toast-ok { border-left-color: var(--accent); }
+.toast-warn { border-left-color: var(--warn); }
+@keyframes toast-in { from { transform: translateY(8px); opacity: 0; } }

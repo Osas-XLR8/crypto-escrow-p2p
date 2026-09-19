@@ -1,8 +1,8 @@
-// src/components/v4/CreateOfferForm.tsx — sign an offer with the wallet and publish it to Nostr relays.
+// src/components/v4/CreateOfferForm.tsx — sign an offer (to sell or to buy) and publish it to Nostr relays.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useWalletClient } from "wagmi";
-import { buildOfferEvent, createOffer, signOffer, type OfferTerms, type PublishResult } from "@escrowx/sdk";
+import { buildOfferEvent, createBuyOffer, createOffer, signOffer, type OfferSide, type OfferTerms, type PublishResult } from "@escrowx/sdk";
 import { useEscrowX } from "@/context/EscrowX";
 import { CHAIN_ID, FIAT_CURRENCIES, RELAYS, V4, arbitratorName } from "@/config/v4";
 import { Button, Card, Field, Notice, errorText } from "@/components/ui";
@@ -18,9 +18,12 @@ const METHOD_SUGGESTIONS: Record<string, string[]> = {
   INR: ["UPI", "IMPS"],
 };
 
-export function CreateOfferForm({ onPublished }: { onPublished?: () => void }) {
+export function CreateOfferForm({ initialSide = "sell", onPublished }: { initialSide?: OfferSide; onPublished?: () => void }) {
   const { address, client, book, identity, binding } = useEscrowX();
   const { data: walletClient } = useWalletClient();
+  const [side, setSide] = useState<OfferSide>(initialSide);
+  useEffect(() => setSide(initialSide), [initialSide]);
+  const selling = side === "sell";
 
   const [f, setF] = useState({
     fiatCurrency: "NGN",
@@ -67,8 +70,7 @@ export function CreateOfferForm({ onPublished }: { onPublished?: () => void }) {
         ...(f.conditions.trim() ? { conditions: f.conditions.trim() } : {}),
       };
       const nowSec = BigInt(Math.floor(Date.now() / 1000));
-      const offer = createOffer({
-        seller: address,
+      const common = {
         token: V4.usdt,
         minAmount: min,
         maxAmount: max,
@@ -77,12 +79,14 @@ export function CreateOfferForm({ onPublished }: { onPublished?: () => void }) {
         releaseWindow: BigInt(Math.round(Number(f.releaseMinutes) * 60)),
         arbitrator: V4.primaryArbitrator,
         fallbackArbitrator: V4.fallbackArbitrator,
-        nonce: await client.sellerNonce(address),
+        nonce: await client.makerNonce(address),
         expiry: nowSec + BigInt(Math.round(Number(f.expiryHours) * 3600)),
         terms,
-      });
+      };
+      const offer = selling ? createOffer({ seller: address, ...common }) : createBuyOffer({ buyer: address, ...common });
 
-      const free = await client.freeBalance(address, V4.usdt);
+      // Sell offers are backed by the vault; a buy offer is funded by whichever seller fills it.
+      const free = selling ? await client.freeBalance(address, V4.usdt) : min;
       const signature = await signOffer(walletClient as never, offer, CHAIN_ID, V4.escrow);
       const event = buildOfferEvent({ offer, signature, terms, binding, identity });
       const results: PublishResult[] = await book.publish(event);
@@ -93,7 +97,11 @@ export function CreateOfferForm({ onPublished }: { onPublished?: () => void }) {
         tone: free < min ? "warn" : "ok",
         text:
           `Live on ${accepted} of ${RELAYS.length} relay${RELAYS.length === 1 ? "" : "s"}.` +
-          (free < min ? ` Buyers can't take it yet — deposit at least ${f.min} ${V4.tokenSymbol} into your vault.` : " Buyers can take it now."),
+          (!selling
+            ? " Sellers can fill it now — you'll get a notification when one does."
+            : free < min
+              ? ` Buyers can't take it yet — deposit at least ${f.min} ${V4.tokenSymbol} into your vault.`
+              : " Buyers can take it now."),
       });
       onPublished?.();
     } catch (e) {
@@ -104,9 +112,24 @@ export function CreateOfferForm({ onPublished }: { onPublished?: () => void }) {
   }
 
   return (
-    <Card title="New sell offer" sub="Signed by your wallet, published to public relays. Your bank details are never published.">
-      <MessagingGate reason="publish offers and receive buyers' messages">
+    <Card
+      title="Post an offer"
+      sub="Signed by your wallet, published to public relays. Bank details are never published — they go privately to your counterparty."
+    >
+      <MessagingGate reason="publish offers and chat privately with whoever takes them">
         <div className="stack">
+          <div className="stack-xs">
+            <span className="field-label">I want to</span>
+            <div className="segmented segmented-lg" role="group" aria-label="Offer side">
+              <button aria-pressed={selling} onClick={() => setSide("sell")}>Sell {V4.tokenSymbol}</button>
+              <button aria-pressed={!selling} onClick={() => setSide("buy")}>Buy {V4.tokenSymbol}</button>
+            </div>
+            <p className="help">
+              {selling
+                ? `Buyers take your offer and your ${V4.tokenSymbol} locks from your vault. They pay you, then you release.`
+                : `Sellers fill your offer and lock their own ${V4.tokenSymbol}. You pay them, then they release it to you.`}
+            </p>
+          </div>
           <div className="fields">
             <Field label="Currency">
               <select className="input" value={f.fiatCurrency} onChange={set("fiatCurrency")}>
@@ -125,13 +148,13 @@ export function CreateOfferForm({ onPublished }: { onPublished?: () => void }) {
             <Field label="Max per trade" hint={V4.tokenSymbol}>
               <input className="input mono" value={f.max} onChange={set("max")} inputMode="decimal" />
             </Field>
-            <Field label="Total to sell" hint={V4.tokenSymbol}>
+            <Field label={selling ? "Total to sell" : "Total to buy"} hint={V4.tokenSymbol}>
               <input className="input mono" value={f.total} onChange={set("total")} inputMode="decimal" />
             </Field>
           </div>
           {!limitsOk && <p className="help warn-text">Limits must satisfy min ≤ max ≤ total.</p>}
 
-          <Field label="Payment methods" hint="how buyers can pay you">
+          <Field label="Payment methods" hint={selling ? "how buyers can pay you" : "how you can pay sellers"}>
             <input className="input" value={f.paymentMethods} onChange={set("paymentMethods")} />
           </Field>
           <div className="row" style={{ gap: 6, marginTop: -8 }}>
@@ -148,11 +171,11 @@ export function CreateOfferForm({ onPublished }: { onPublished?: () => void }) {
 
           <details className="inset" style={{ padding: "10px 14px" }}>
             <summary className="small strong" style={{ cursor: "pointer" }}>
-              Timing <span className="faint" style={{ fontWeight: 400 }}>· pay within {f.paymentMinutes} min · release within {f.releaseMinutes} min · expires in {f.expiryHours} h</span>
+              Timing <span className="faint" style={{ fontWeight: 400 }}>· payment within {f.paymentMinutes} min · release within {f.releaseMinutes} min · expires in {f.expiryHours} h</span>
             </summary>
             <div className="fields" style={{ marginTop: 12 }}>
-              <Field label="Buyer pays within" hint="10–180 min"><input className="input mono" value={f.paymentMinutes} onChange={set("paymentMinutes")} inputMode="numeric" /></Field>
-              <Field label="You release within" hint="30–1440 min"><input className="input mono" value={f.releaseMinutes} onChange={set("releaseMinutes")} inputMode="numeric" /></Field>
+              <Field label={selling ? "Buyer pays within" : "You pay within"} hint="10–180 min"><input className="input mono" value={f.paymentMinutes} onChange={set("paymentMinutes")} inputMode="numeric" /></Field>
+              <Field label={selling ? "You release within" : "Seller releases within"} hint="30–1440 min"><input className="input mono" value={f.releaseMinutes} onChange={set("releaseMinutes")} inputMode="numeric" /></Field>
               <Field label="Offer expires in" hint="hours"><input className="input mono" value={f.expiryHours} onChange={set("expiryHours")} inputMode="numeric" /></Field>
             </div>
           </details>
@@ -166,7 +189,7 @@ export function CreateOfferForm({ onPublished }: { onPublished?: () => void }) {
 
           <div>
             <Button variant="primary" onClick={() => void publish()} disabled={!walletClient || !limitsOk || !priceOk || methods.length === 0} busy={busy}>
-              {busy ? "Sign in your wallet…" : "Sign & publish offer"}
+              {busy ? "Sign in your wallet…" : selling ? "Sign & publish sell offer" : "Sign & publish buy offer"}
             </Button>
           </div>
         </div>

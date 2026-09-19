@@ -4,6 +4,8 @@ import { useMemo, useState } from "react";
 import { StateBadge } from "@/components/StateBadge";
 import { Card, Empty, Notice } from "@/components/ui";
 import { V4 } from "@/config/v4";
+import { useMessages } from "@/context/Messages";
+import { useToasts } from "@/context/Toasts";
 import { fmtAgo, shortAddr } from "@/lib/format";
 import { fmtToken } from "@/lib/v4/local";
 import { V4State, nextStep, roles, type TradeSummary } from "@/lib/v4/tradeIndex";
@@ -29,6 +31,8 @@ export function TradesPanel({ trades, address, chainNow, arbitrationTimeout, sel
   isLoading: boolean;
   onBrowse: () => void;
 }) {
+  const messages = useMessages();
+  const { browserPermission, enableBrowserNotifications } = useToasts();
   const rows = useMemo(
     () => trades.map((t) => ({ t, step: nextStep(t, { address, chainNow, arbitrationTimeout }), r: roles(t, address) })),
     [trades, address, chainNow, arbitrationTimeout]
@@ -58,6 +62,11 @@ export function TradesPanel({ trades, address, chainNow, arbitrationTimeout, sel
           </span>
         </>
       }
+      sub={browserPermission === "default" ? (
+        <button className="btn btn-ghost btn-sm" style={{ padding: 0, height: "auto" }} onClick={() => void enableBrowserNotifications()}>
+          🔔 Get notified when the other side acts, even in another tab
+        </button>
+      ) : undefined}
       right={
         <div className="segmented" role="group" aria-label="Filter trades">
           {FILTERS.map(({ key, label }) => (
@@ -93,6 +102,9 @@ export function TradesPanel({ trades, address, chainNow, arbitrationTimeout, sel
                 <span className="mono strong">#{t.tradeId.toString()}</span>
                 <StateBadge state={t.state} />
                 {(r.isBuyer || r.isSeller) && <span className="chip">{r.isBuyer ? "buying" : "selling"}</span>}
+                {messages.unread(t.tradeId) > 0 && (
+                  <span className="chip chip-info" title="Unread messages">💬 {messages.unread(t.tradeId)}</span>
+                )}
               </div>
               <span className="tiny faint mono">
                 {r.isBuyer ? `from ${shortAddr(t.seller)}` : r.isSeller ? `to ${shortAddr(t.buyer)}` : `${shortAddr(t.seller)} → ${shortAddr(t.buyer)}`}

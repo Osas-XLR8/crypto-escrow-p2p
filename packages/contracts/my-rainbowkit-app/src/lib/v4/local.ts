@@ -3,7 +3,7 @@
 // (the user just re-enters or re-derives what's missing).
 
 import { formatUnits, parseUnits, type Address, type Hex } from "viem";
-import { parseOfferEvent, type OfferBook } from "@escrowx/sdk";
+import { parseOfferEvent, type OfferBook, type OfferSide, type ParsedOffer } from "@escrowx/sdk";
 import { CHAIN_ID, V4 } from "@/config/v4";
 
 const scope = `${CHAIN_ID}:${V4.escrow.toLowerCase()}`;
@@ -25,37 +25,20 @@ function set(key: string, value: string): boolean {
   }
 }
 
-// ─── Counterparty messaging keys ──────────────────────────────────────────────
-
-export function rememberPeerKey(tradeId: bigint, pubkey: string) {
-  set(`escrowx:peer:${scope}:${tradeId}`, pubkey);
-}
-
-export function recallPeerKey(tradeId: bigint): string | null {
-  const v = get(`escrowx:peer:${scope}:${tradeId}`);
-  return v && /^[0-9a-f]{64}$/.test(v) ? v : null;
-}
-
-/** Finds the seller's wallet-bound Nostr key from any of their verified offer events on the relays. */
-export async function findSellerKey(book: OfferBook, seller: Address): Promise<string | null> {
-  const events = await book.pool.querySync(book.relays, book.filter({ chainId: CHAIN_ID }), { maxWait: 3000 });
-  for (const event of events) {
-    try {
-      const parsed = await parseOfferEvent(event, { chainId: CHAIN_ID, escrow: V4.escrow, now: null });
-      if (parsed.offer.seller.toLowerCase() === seller.toLowerCase()) return event.pubkey;
-    } catch {
-      /* ignore invalid events */
-    }
-  }
-  return null;
-}
-
-// ─── Offer terms behind a trade (price + currency live off-chain, in the signed offer) ──
+// ─── The offer behind a trade ─────────────────────────────────────────────────
+//
+// Price, currency and the maker's messaging key live in the signed offer on the relays, not on-chain.
+// The trade's on-chain offerHash identifies it exactly (it's the event's d tag, which relays index).
 
 export interface TradeTerms {
   price: string;
   fiatCurrency: string;
   paymentMethods: string[];
+  /** Side of the offer the trade came from, and who made it. */
+  side?: OfferSide;
+  maker?: Address;
+  /** Maker's wallet-bound messaging key, verified when the offer was parsed. */
+  makerKey?: string;
 }
 
 export function rememberTradeTerms(tradeId: bigint, terms: TradeTerms) {
@@ -71,20 +54,43 @@ export function recallTradeTerms(tradeId: bigint): TradeTerms | null {
   }
 }
 
-/** Finds the terms of the seller's signed offer a trade was opened from (matched by offer hash). */
-export async function findTradeTerms(book: OfferBook, seller: Address, offerHash: string): Promise<TradeTerms | null> {
-  const events = await book.pool.querySync(book.relays, book.filter({ chainId: CHAIN_ID }), { maxWait: 3000 });
+export function termsFromOffer(o: ParsedOffer): TradeTerms {
+  return { price: o.terms.price, fiatCurrency: o.terms.fiatCurrency, paymentMethods: o.terms.paymentMethods, side: o.side, maker: o.maker, makerKey: o.event.pubkey };
+}
+
+/** Finds and verifies the offer a trade was opened from (either side), by its on-chain offer hash. */
+export async function findTradeOffer(book: OfferBook, offerHash: string): Promise<ParsedOffer | null> {
+  const filter = { ...book.filter({ chainId: CHAIN_ID }), "#d": [offerHash.toLowerCase()] };
+  const events = await book.pool.querySync(book.relays, filter, { maxWait: 3000 });
   for (const event of events) {
     try {
       const parsed = await parseOfferEvent(event, { chainId: CHAIN_ID, escrow: V4.escrow, now: null });
-      if (parsed.offerHash.toLowerCase() === offerHash.toLowerCase() && parsed.offer.seller.toLowerCase() === seller.toLowerCase()) {
-        return { price: parsed.terms.price, fiatCurrency: parsed.terms.fiatCurrency, paymentMethods: parsed.terms.paymentMethods };
-      }
+      if (parsed.offerHash.toLowerCase() === offerHash.toLowerCase()) return parsed;
     } catch {
       /* ignore invalid events */
     }
   }
   return null;
+}
+
+// ─── Chat bookkeeping (per device) ────────────────────────────────────────────
+
+/** Whether this wallet already introduced its messaging key for a trade (sent once per trade). */
+export function helloSent(tradeId: bigint, me: string): boolean {
+  return get(`escrowx:hello:${scope}:${me.toLowerCase()}:${tradeId}`) === "1";
+}
+
+export function markHelloSent(tradeId: bigint, me: string) {
+  set(`escrowx:hello:${scope}:${me.toLowerCase()}:${tradeId}`, "1");
+}
+
+/** Timestamp (message createdAt) up to which a trade's chat has been read on this device. */
+export function lastRead(tradeId: string, me: string): number {
+  return Number(get(`escrowx:read:${scope}:${me.toLowerCase()}:${tradeId}`) ?? 0);
+}
+
+export function markRead(tradeId: string, me: string, at: number) {
+  if (at > lastRead(tradeId, me)) set(`escrowx:read:${scope}:${me.toLowerCase()}:${tradeId}`, String(at));
 }
 
 // ─── Buyer's encrypted payment evidence (kept on this device) ─────────────────

@@ -211,6 +211,9 @@ Important UI rule:
 - v4 redesign underway on branches (see git log): EscrowCoreV4 (no platform control over funds),
   loser-pays arbitration + fallback arbitrator + licensed-firm adapter, @escrowx/sdk, and the web app
   migrated to v4 (Market / Sell / Trades, relay offer book, encrypted chat, sealed evidence)
+- Two-sided market: EscrowCoreV4 gained buyer-signed BuyOffers that sellers fill (vault first, then wallet);
+  makerNonce replaces sellerNonce; the web app has Buy/Sell market sides, posting either side, and a persistent
+  E2E trade chat with on-chain milestones, notifications and unread badges
 - Web app redesigned (light/dark design system, onboarding checklist, fiat amounts on trades) and made
   network-agnostic: static export, chunked log scanning, TestUSDT faucet token, `deploy-testnet.sh` for
   Base Sepolia, and a GitHub Pages workflow (`.github/workflows/deploy-web.yml`)

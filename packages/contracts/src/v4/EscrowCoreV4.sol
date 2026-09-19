@@ -16,9 +16,11 @@ import {IArbitrator, IArbitrable, IDisputeParties, IEvidence} from "./interfaces
         backend signature instead — that gave the platform functional control over sellers'
         money and is gone.
 
-    [3] Trades are created by the BUYER taking a seller-signed EIP-712 offer. Sellers pre-fund
-        a vault they alone can withdraw from; taking an offer atomically moves the amount from
-        the seller's free balance into the trade. No operator creates trades.
+    [3] Trades are created by a counterparty taking a signed EIP-712 offer, never by an operator:
+          - a BUYER takes a seller-signed Offer; the amount moves from the seller's pre-funded vault
+          - a SELLER takes a buyer-signed BuyOffer; the seller's crypto comes from their vault, with
+            any shortfall pulled from their wallet in the same transaction
+        Either way the seller's crypto is locked atomically, and the resulting trade is identical.
 
     [4] Exits never depend on anyone but the parties:
           • buyer can cancel at any time (funds return to the seller's vault)
@@ -98,7 +100,7 @@ contract EscrowCoreV4 is IArbitrable, IEvidence, IDisputeParties {
         FEE_DEFAULT
     }
 
-    /// @notice Signed by the seller off-chain and published (e.g. to Nostr relays).
+    /// @notice Sell offer: signed by the seller off-chain and published (e.g. to Nostr relays).
     /// @dev All members are static types, so abi.encode(TYPEHASH, offer) is the EIP-712 hashStruct.
     struct Offer {
         address seller;
@@ -111,7 +113,27 @@ contract EscrowCoreV4 is IArbitrable, IEvidence, IDisputeParties {
         address arbitrator;
         address fallbackArbitrator;
         bytes32 termsHash; // hash of off-chain terms: fiat currency, price, payment rails
-        uint256 nonce; // must equal sellerNonce[seller]; bumping it cancels all offers
+        uint256 nonce; // must equal makerNonce[seller]; bumping it cancels all of the maker's offers
+        uint64 expiry;
+        bytes32 salt;
+    }
+
+    /// @notice Buy offer: signed by the buyer ("I want to buy up to totalAmount on these terms").
+    ///         A seller takes it and their crypto is locked; the buyer then pays fiat as usual.
+    /// @dev Same layout as Offer but a distinct EIP-712 type, so a signature for one can never be
+    ///      replayed as the other.
+    struct BuyOffer {
+        address buyer;
+        address token;
+        uint256 minAmount;
+        uint256 maxAmount;
+        uint256 totalAmount;
+        uint64 paymentWindow;
+        uint64 releaseWindow;
+        address arbitrator;
+        address fallbackArbitrator;
+        bytes32 termsHash;
+        uint256 nonce; // must equal makerNonce[buyer]
         uint64 expiry;
         bytes32 salt;
     }
@@ -163,6 +185,10 @@ contract EscrowCoreV4 is IArbitrable, IEvidence, IDisputeParties {
         "Offer(address seller,address token,uint256 minAmount,uint256 maxAmount,uint256 totalAmount,uint64 paymentWindow,uint64 releaseWindow,address arbitrator,address fallbackArbitrator,bytes32 termsHash,uint256 nonce,uint64 expiry,bytes32 salt)"
     );
 
+    bytes32 public constant BUY_OFFER_TYPEHASH = keccak256(
+        "BuyOffer(address buyer,address token,uint256 minAmount,uint256 maxAmount,uint256 totalAmount,uint64 paymentWindow,uint64 releaseWindow,address arbitrator,address fallbackArbitrator,bytes32 termsHash,uint256 nonce,uint64 expiry,bytes32 salt)"
+    );
+
     bytes32 private constant _EIP712_DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 private constant _NAME_HASH = keccak256("EscrowX");
@@ -183,7 +209,9 @@ contract EscrowCoreV4 is IArbitrable, IEvidence, IDisputeParties {
 
     /// seller => token => balance not locked in any trade (withdrawable by the seller at any time)
     mapping(address => mapping(address => uint256)) public freeBalance;
-    mapping(address => uint256) public sellerNonce;
+    /// Offer nonce per maker (seller of an Offer, buyer of a BuyOffer); bumping it cancels all their offers.
+    mapping(address => uint256) public makerNonce;
+    /// Keyed by offer hash; Offer and BuyOffer hashes never collide (distinct EIP-712 types).
     mapping(bytes32 => uint256) public filled;
     mapping(bytes32 => bool) public offerCancelled;
     /// arbitrator => disputeId => tradeId
@@ -201,8 +229,8 @@ contract EscrowCoreV4 is IArbitrable, IEvidence, IDisputeParties {
 
     event Deposited(address indexed seller, address indexed token, uint256 amount);
     event Withdrawn(address indexed seller, address indexed token, uint256 amount);
-    event OfferCancelled(bytes32 indexed offerHash, address indexed seller);
-    event NonceBumped(address indexed seller, uint256 newNonce);
+    event OfferCancelled(bytes32 indexed offerHash, address indexed maker);
+    event NonceBumped(address indexed maker, uint256 newNonce);
     event TradeOpened(
         uint256 indexed tradeId,
         bytes32 indexed offerHash,
@@ -264,16 +292,7 @@ contract EscrowCoreV4 is IArbitrable, IEvidence, IDisputeParties {
 
     /// @notice Credits the amount actually received (safe for tokens that take a transfer fee).
     function deposit(address token, uint256 amount) external nonReentrant {
-        require(supportedToken[token], "unsupported token");
-        require(amount > 0, "zero amount");
-
-        uint256 before = IERC20Minimal(token).balanceOf(address(this));
-        _safeTransferFrom(token, msg.sender, address(this), amount);
-        uint256 received = IERC20Minimal(token).balanceOf(address(this)) - before;
-        require(received > 0, "nothing received");
-
-        freeBalance[msg.sender][token] += received;
-        emit Deposited(msg.sender, token, received);
+        _deposit(msg.sender, token, amount);
     }
 
     /// @notice Withdraws unlocked balance. Never pausable, never screened.
@@ -306,9 +325,16 @@ contract EscrowCoreV4 is IArbitrable, IEvidence, IDisputeParties {
         emit OfferCancelled(h, msg.sender);
     }
 
-    /// @notice Invalidates every outstanding offer signed with the current nonce.
+    function cancelBuyOffer(BuyOffer calldata offer) external {
+        require(msg.sender == offer.buyer, "only buyer");
+        bytes32 h = hashBuyOffer(offer);
+        offerCancelled[h] = true;
+        emit OfferCancelled(h, msg.sender);
+    }
+
+    /// @notice Invalidates every outstanding offer (sell and buy) signed with the current nonce.
     function bumpNonce() external {
-        uint256 n = ++sellerNonce[msg.sender];
+        uint256 n = ++makerNonce[msg.sender];
         emit NonceBumped(msg.sender, n);
     }
 
@@ -321,13 +347,30 @@ contract EscrowCoreV4 is IArbitrable, IEvidence, IDisputeParties {
         bytes32 offerHash = hashOffer(offer);
         _validateOffer(offer, offerHash, signature, amount);
 
-        uint256 free = freeBalance[offer.seller][offer.token];
-        require(free >= amount, "insufficient seller balance");
-
-        freeBalance[offer.seller][offer.token] = free - amount;
+        _lock(offer.seller, offer.token, amount);
         filled[offerHash] += amount;
 
-        tradeId = _storeTrade(offer, offerHash, amount);
+        tradeId = _storeTrade(offer, offerHash, offer.seller, msg.sender, amount);
+        _emitTradeOpened(tradeId, _trades[tradeId]);
+    }
+
+    /// @notice Seller fills `amount` of a buyer-signed buy offer. The seller's free vault balance is
+    ///         used first; any shortfall is pulled from the seller's wallet (needs an ERC-20 approval).
+    function takeBuyOffer(BuyOffer calldata buyOffer, bytes calldata signature, uint256 amount)
+        external
+        nonReentrant
+        returns (uint256 tradeId)
+    {
+        bytes32 offerHash = hashBuyOffer(buyOffer);
+        Offer memory offer = _asOffer(buyOffer); // the maker (buyer) sits in the `seller` slot for validation
+        _validateOffer(offer, offerHash, signature, amount);
+
+        uint256 free = freeBalance[msg.sender][offer.token];
+        if (free < amount) _deposit(msg.sender, offer.token, amount - free);
+        _lock(msg.sender, offer.token, amount);
+        filled[offerHash] += amount;
+
+        tradeId = _storeTrade(offer, offerHash, msg.sender, buyOffer.buyer, amount);
         _emitTradeOpened(tradeId, _trades[tradeId]);
     }
 
@@ -548,9 +591,21 @@ contract EscrowCoreV4 is IArbitrable, IEvidence, IDisputeParties {
     }
 
     /// @notice How much more can be taken from an offer right now (0 if it can't be taken at all).
+    function hashBuyOffer(BuyOffer calldata offer) public view returns (bytes32) {
+        return
+            keccak256(abi.encodePacked("\x19\x01", domainSeparator(), keccak256(abi.encode(BUY_OFFER_TYPEHASH, offer))));
+    }
+
+    /// @notice Amount still fillable from a buy offer (sellers bring their own crypto, so no balance cap).
+    function remainingBuy(BuyOffer calldata offer) external view returns (uint256) {
+        bytes32 h = hashBuyOffer(offer);
+        if (offerCancelled[h] || offer.nonce != makerNonce[offer.buyer] || block.timestamp > offer.expiry) return 0;
+        return offer.totalAmount > filled[h] ? offer.totalAmount - filled[h] : 0;
+    }
+
     function remaining(Offer calldata offer) external view returns (uint256) {
         bytes32 h = hashOffer(offer);
-        if (offerCancelled[h] || offer.nonce != sellerNonce[offer.seller] || block.timestamp > offer.expiry) return 0;
+        if (offerCancelled[h] || offer.nonce != makerNonce[offer.seller] || block.timestamp > offer.expiry) return 0;
         uint256 left = offer.totalAmount > filled[h] ? offer.totalAmount - filled[h] : 0;
         uint256 free = freeBalance[offer.seller][offer.token];
         return left < free ? left : free;
@@ -558,11 +613,14 @@ contract EscrowCoreV4 is IArbitrable, IEvidence, IDisputeParties {
 
     // ─── Internal: trades ─────────────────────────────────────────────────────
 
-    function _storeTrade(Offer calldata offer, bytes32 offerHash, uint256 amount) private returns (uint256 tradeId) {
+    function _storeTrade(Offer memory offer, bytes32 offerHash, address seller, address buyer, uint256 amount)
+        private
+        returns (uint256 tradeId)
+    {
         tradeId = ++tradeCount;
         Trade storage t = _trades[tradeId];
-        t.seller = offer.seller;
-        t.buyer = msg.sender;
+        t.seller = seller;
+        t.buyer = buyer;
         t.token = offer.token;
         t.arbitrator = offer.arbitrator;
         t.fallbackArbitrator = offer.fallbackArbitrator;
@@ -580,12 +638,13 @@ contract EscrowCoreV4 is IArbitrable, IEvidence, IDisputeParties {
         );
     }
 
-    function _validateOffer(Offer calldata offer, bytes32 offerHash, bytes calldata signature, uint256 amount)
+    /// @dev Validates either offer kind; `offer.seller` holds the MAKER (seller of an Offer, buyer of a BuyOffer).
+    function _validateOffer(Offer memory offer, bytes32 offerHash, bytes calldata signature, uint256 amount)
         internal
         view
     {
-        require(offer.seller != address(0), "zero seller");
-        require(msg.sender != offer.seller, "seller cannot take own offer");
+        require(offer.seller != address(0), "zero maker");
+        require(msg.sender != offer.seller, "cannot take own offer");
         require(supportedToken[offer.token], "unsupported token");
         require(approvedArbitrator[offer.arbitrator], "arbitrator not approved");
         require(approvedArbitrator[offer.fallbackArbitrator], "fallback arbitrator not approved");
@@ -597,12 +656,51 @@ contract EscrowCoreV4 is IArbitrable, IEvidence, IDisputeParties {
             offer.releaseWindow >= MIN_RELEASE_WINDOW && offer.releaseWindow <= MAX_RELEASE_WINDOW, "bad release window"
         );
         require(block.timestamp <= offer.expiry, "offer expired");
-        require(offer.nonce == sellerNonce[offer.seller], "offer nonce invalid");
+        require(offer.nonce == makerNonce[offer.seller], "offer nonce invalid");
         require(!offerCancelled[offerHash], "offer cancelled");
         require(offer.minAmount > 0 && offer.minAmount <= offer.maxAmount, "bad offer limits");
         require(amount >= offer.minAmount && amount <= offer.maxAmount, "amount out of range");
         require(filled[offerHash] + amount <= offer.totalAmount, "offer capacity exceeded");
-        require(_isValidSignature(offer.seller, offerHash, signature), "invalid seller signature");
+        require(_isValidSignature(offer.seller, offerHash, signature), "invalid maker signature");
+    }
+
+    function _asOffer(BuyOffer calldata b) private pure returns (Offer memory) {
+        return Offer({
+            seller: b.buyer,
+            token: b.token,
+            minAmount: b.minAmount,
+            maxAmount: b.maxAmount,
+            totalAmount: b.totalAmount,
+            paymentWindow: b.paymentWindow,
+            releaseWindow: b.releaseWindow,
+            arbitrator: b.arbitrator,
+            fallbackArbitrator: b.fallbackArbitrator,
+            termsHash: b.termsHash,
+            nonce: b.nonce,
+            expiry: b.expiry,
+            salt: b.salt
+        });
+    }
+
+    /// @dev Credits the amount actually received (safe for tokens that take a transfer fee).
+    function _deposit(address from, address token, uint256 amount) private {
+        require(supportedToken[token], "unsupported token");
+        require(amount > 0, "zero amount");
+
+        uint256 before = IERC20Minimal(token).balanceOf(address(this));
+        _safeTransferFrom(token, from, address(this), amount);
+        uint256 received = IERC20Minimal(token).balanceOf(address(this)) - before;
+        require(received > 0, "nothing received");
+
+        freeBalance[from][token] += received;
+        emit Deposited(from, token, received);
+    }
+
+    /// @dev Moves `amount` from the seller's free balance into a trade.
+    function _lock(address seller, address token, uint256 amount) private {
+        uint256 free = freeBalance[seller][token];
+        require(free >= amount, "insufficient seller balance");
+        freeBalance[seller][token] = free - amount;
     }
 
     function _isOpen(State s) internal pure returns (bool) {
