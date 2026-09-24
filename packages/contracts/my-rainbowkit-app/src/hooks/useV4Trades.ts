@@ -9,7 +9,8 @@ import { useQuery } from "@tanstack/react-query";
 import { usePublicClient } from "wagmi";
 import type { AbiEvent, PublicClient } from "viem";
 import { escrowCoreV4Abi } from "@escrowx/sdk";
-import { LOG_CHUNK, POLL_MS, V4 } from "@/config/v4";
+import { POLL_MS, V4 } from "@/config/v4";
+import { scanLogs as scanRange } from "@/lib/v4/logs";
 import { buildTradeIndex, type RawLog, type TradeSummary } from "@/lib/v4/tradeIndex";
 
 const REORG_DEPTH = 12n;
@@ -27,13 +28,9 @@ async function scanLogs(client: PublicClient, latest: bigint): Promise<RawLog[]>
   let from = start < V4.deployBlock ? V4.deployBlock : start;
   // Drop what we're about to re-read, so a reorged-out log doesn't linger.
   for (const [k, l] of scan.logs) if (l.blockNumber !== null && (l.blockNumber as bigint) >= from) scan.logs.delete(k);
-  while (from <= latest) {
-    const to = from + LOG_CHUNK - 1n < latest ? from + LOG_CHUNK - 1n : latest;
-    const logs = (await client.getLogs({ address: V4.escrow, events: EVENTS, fromBlock: from, toBlock: to })) as unknown as RawLog[];
-    for (const l of logs) scan.logs.set(`${l.transactionHash}:${l.logIndex}`, l);
-    scan.scannedTo = to;
-    from = to + 1n;
-  }
+  const fresh = await scanRange<RawLog>(client, { address: V4.escrow, events: EVENTS, fromBlock: from, toBlock: latest });
+  for (const l of fresh) scan.logs.set(`${l.transactionHash}:${l.logIndex}`, l);
+  scan.scannedTo = latest;
   return [...scan.logs.values()].sort((a, b) =>
     (a.blockNumber as bigint) === (b.blockNumber as bigint) ? Number(a.logIndex) - Number(b.logIndex) : (a.blockNumber as bigint) < (b.blockNumber as bigint) ? -1 : 1
   );

@@ -153,6 +153,9 @@ export class EscrowV4Client {
     const hash = await wallet.writeContract({ ...(request as object), chain } as never);
     const receipt = await this.publicClient.waitForTransactionReceipt({ hash });
     if (receipt.status !== "success") throw new Error(`${functionName} reverted (${hash})`);
+    // Public RPCs are load-balanced: the next call can land on a node that hasn't seen this block yet, which
+    // would simulate the following action against stale state. Wait until the endpoint has caught up.
+    await waitUntil(async () => (await this.publicClient.getBlockNumber({ cacheTime: 0 })) >= receipt.blockNumber);
     return receipt;
   }
 

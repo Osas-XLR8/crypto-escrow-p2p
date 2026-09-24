@@ -3,7 +3,8 @@
 
 import type { AbiEvent, Address, Hex, PublicClient, WalletClient } from "viem";
 import { escrowCoreV4Abi, licensedArbitratorAdapterAbi } from "@escrowx/sdk";
-import { LOG_CHUNK, V4 } from "@/config/v4";
+import { V4 } from "@/config/v4";
+import { scanLogs } from "@/lib/v4/logs";
 
 export const RULING_BUYER = 1n;
 export const RULING_SELLER = 2n;
@@ -28,6 +29,11 @@ export interface CaseInfo {
   proposedAt: number;
   hasProposal: boolean;
   executed: boolean;
+  /** From the escrow: when this arbitrator's dispute started, and whether the case was escalated away. */
+  startedAt: number;
+  escalated: boolean;
+  /** Party that opened the dispute (zero address if the escrow has no record). */
+  opener: Address;
 }
 
 const adapter = (address: Address) => ({ address, abi: licensedArbitratorAdapterAbi }) as const;
@@ -52,10 +58,14 @@ export async function readCases(client: PublicClient, firm: FirmInfo): Promise<C
   return Promise.all(
     ids.map(async (disputeId) => {
       const c = await client.readContract({ ...adapter(firm.address), functionName: "getCase", args: [disputeId] });
-      const tradeId =
-        c.arbitrable.toLowerCase() === V4.escrow.toLowerCase()
-          ? await client.readContract({ address: V4.escrow, abi: escrowCoreV4Abi, functionName: "disputeToTrade", args: [firm.address, disputeId] })
-          : 0n;
+      const ours = c.arbitrable.toLowerCase() === V4.escrow.toLowerCase();
+      const tradeId = ours
+        ? await client.readContract({ address: V4.escrow, abi: escrowCoreV4Abi, functionName: "disputeToTrade", args: [firm.address, disputeId] })
+        : 0n;
+      const dispute =
+        tradeId > 0n
+          ? await client.readContract({ address: V4.escrow, abi: escrowCoreV4Abi, functionName: "getDispute", args: [tradeId] })
+          : null;
       return {
         disputeId,
         tradeId,
@@ -65,6 +75,9 @@ export async function readCases(client: PublicClient, firm: FirmInfo): Promise<C
         proposedAt: Number(c.proposedAt),
         hasProposal: c.hasProposal,
         executed: c.executed,
+        startedAt: Number(dispute?.startedAt ?? 0n),
+        escalated: dispute?.escalated ?? false,
+        opener: (dispute?.opener ?? "0x0000000000000000000000000000000000000000") as Address,
       };
     })
   );
@@ -77,16 +90,18 @@ const panelCache = new Map<string, { scannedTo: bigint; latest: Map<string, { pa
 export async function readPanel(client: PublicClient, firm: Address): Promise<{ panelist: Address; key: Hex }[]> {
   const cache = panelCache.get(firm) ?? { scannedTo: V4.deployBlock - 1n, latest: new Map() };
   const head = await client.getBlockNumber({ cacheTime: 0 });
-  let from = cache.scannedTo + 1n;
-  while (from <= head) {
-    const to = from + LOG_CHUNK - 1n < head ? from + LOG_CHUNK - 1n : head;
-    const logs = await client.getLogs({ address: firm, event: PANELIST_UPDATED, fromBlock: from, toBlock: to });
+  const from = cache.scannedTo + 1n;
+  if (from <= head) {
+    const logs = await scanLogs<{ args: { panelist: Address; active: boolean; encryptionKey: Hex } }>(client, {
+      address: firm,
+      event: PANELIST_UPDATED,
+      fromBlock: from,
+      toBlock: head,
+    });
     for (const l of logs) {
-      const args = (l as unknown as { args: { panelist: Address; active: boolean; encryptionKey: Hex } }).args;
-      cache.latest.set(args.panelist.toLowerCase(), { panelist: args.panelist, active: args.active, key: args.encryptionKey });
+      cache.latest.set(l.args.panelist.toLowerCase(), { panelist: l.args.panelist, active: l.args.active, key: l.args.encryptionKey });
     }
-    cache.scannedTo = to;
-    from = to + 1n;
+    cache.scannedTo = head;
   }
   panelCache.set(firm, cache);
   return [...cache.latest.values()].filter((v) => v.active).map((v) => ({ panelist: v.panelist, key: v.key }));
@@ -97,7 +112,17 @@ export async function writeFirm(
   client: PublicClient,
   wallet: WalletClient,
   firm: Address,
-  functionName: "setPanelist" | "assign" | "proposeRuling" | "vetoProposal" | "executeRuling" | "withdrawFees",
+  functionName:
+    | "setPanelist"
+    | "assign"
+    | "proposeRuling"
+    | "vetoProposal"
+    | "executeRuling"
+    | "withdrawFees"
+    | "setFee"
+    | "setTreasury"
+    | "transferFirmAdmin"
+    | "acceptFirmAdmin",
   args: readonly unknown[]
 ): Promise<void> {
   if (!wallet.account) throw new Error("Connect a wallet first");
@@ -111,4 +136,13 @@ export async function writeFirm(
   const hash = await wallet.writeContract(request as never);
   const receipt = await client.waitForTransactionReceipt({ hash });
   if (receipt.status !== "success") throw new Error("Transaction reverted");
+}
+
+/**
+ * How long this firm still has to rule before either party can move the case to the escrow's fallback
+ * arbitrator. Returns null when the case is closed or the escrow has no start time for it.
+ */
+export function escalationDeadline(c: CaseInfo, arbitrationTimeout: number): number | null {
+  if (c.executed || c.escalated || !c.startedAt || !arbitrationTimeout) return null;
+  return c.startedAt + arbitrationTimeout;
 }

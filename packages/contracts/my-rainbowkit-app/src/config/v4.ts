@@ -17,7 +17,18 @@ export const CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? 31337);
 const known = SUPPORTED.find((c) => c.id === CHAIN_ID);
 if (!known) throw new Error(`Unsupported NEXT_PUBLIC_CHAIN_ID ${CHAIN_ID}`);
 
-export const RPC_URL = process.env.NEXT_PUBLIC_RPC_URL || known.rpcUrls.default.http[0]!;
+/**
+ * Default endpoints per chain. Base's own testnet RPC caps eth_getLogs at 1,000 blocks, which makes reading
+ * trade history slow; these allow much wider ranges. Override with NEXT_PUBLIC_RPC_URL.
+ */
+const PREFERRED_RPC: Record<number, string> = {
+  [baseSepolia.id]: "https://base-sepolia-rpc.publicnode.com",
+  [sepolia.id]: "https://ethereum-sepolia-rpc.publicnode.com",
+  [optimismSepolia.id]: "https://optimism-sepolia-rpc.publicnode.com",
+  [arbitrumSepolia.id]: "https://arbitrum-sepolia-rpc.publicnode.com",
+};
+
+export const RPC_URL = process.env.NEXT_PUBLIC_RPC_URL || PREFERRED_RPC[CHAIN_ID] || known.rpcUrls.default.http[0]!;
 export const CHAIN: Chain = { ...known, rpcUrls: { default: { http: [RPC_URL] } } };
 export const IS_LOCAL = CHAIN_ID === anvil.id;
 export const IS_TESTNET = IS_LOCAL || !!known.testnet;
@@ -44,8 +55,11 @@ export const RELAYS: string[] = list(
 /** Optional: enables WalletConnect-based wallets (mobile Trust Wallet, MetaMask Mobile, …). Free at cloud.reown.com. */
 export const WALLETCONNECT_PROJECT_ID = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || "";
 
-/** Blocks per eth_getLogs request; public RPCs cap the range. */
-export const LOG_CHUNK = BigInt(process.env.NEXT_PUBLIC_LOG_CHUNK || (IS_LOCAL ? "100000" : "9000"));
+/**
+ * Blocks per eth_getLogs request. Endpoints cap this differently, so it's only a starting point: the scanner
+ * halves it automatically whenever an endpoint rejects the range (see lib/v4/logs.ts).
+ */
+export const LOG_CHUNK = BigInt(process.env.NEXT_PUBLIC_LOG_CHUNK || (IS_LOCAL ? "100000" : "50000"));
 export const POLL_MS = IS_LOCAL ? 4000 : 8000;
 
 /** Where to get gas on this network. */

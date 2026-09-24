@@ -1,30 +1,41 @@
 // src/pages/arbitrate.tsx — arbitration desk for licensed firms and their panelists.
 //
-// Reads and writes a firm's LicensedArbitratorAdapter directly. The firm admin manages the panel and assigns
-// cases; the assigned panelist opens the sealed evidence and proposes a ruling; after the review period anyone
-// can execute it. A ruling can only send the disputed trade's locked crypto to its buyer or back to its seller.
+// Reads and writes a firm's LicensedArbitratorAdapter directly. The firm admin manages the panel, assigns
+// cases and can veto; the assigned panelist opens the sealed evidence and proposes a ruling; after the review
+// period anyone can execute it. A ruling can only send the disputed trade's locked crypto to its buyer or back
+// to its seller — and if the firm is slow, the parties can take the case to the escrow's fallback arbitrator,
+// so every case here carries that deadline.
 
 import Head from "next/head";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { formatEther, keccak256, toBytes, zeroAddress, zeroHash, type Address, type Hex } from "viem";
+import { formatEther, keccak256, parseEther, toBytes, zeroAddress, zeroHash, type Address, type Hex } from "viem";
 import { useAccount, usePublicClient, useWalletClient } from "wagmi";
 import { adapterKeyFromNostrPubkey, decryptEvidence, keyFromHex, openEvidenceKey, parseEvidenceUri } from "@escrowx/sdk";
 import { useEscrowX } from "@/context/EscrowX";
 import { IS_TESTNET, V4, arbitratorName } from "@/config/v4";
 import { ConnectPrompt, Shell } from "@/components/Shell";
 import { StateBadge } from "@/components/StateBadge";
-import { Addr, Button, Card, Chip, CopyButton, Empty, Field, KV, Notice, errorText } from "@/components/ui";
+import { Addr, Button, Card, Chip, CopyButton, Empty, Field, KV, Notice, TxLink, errorText } from "@/components/ui";
 import { MessagingGate } from "@/components/v4/MessagingGate";
 import { useV4Trades } from "@/hooks/useV4Trades";
 import { fmtDuration, fmtTs, shortAddr, shortHash } from "@/lib/format";
-import { RULING_BUYER, RULING_SELLER, readCases, readFirm, readPanel, writeFirm, type CaseInfo, type FirmInfo } from "@/lib/v4/arbitration";
+import { RULING_BUYER, RULING_SELLER, escalationDeadline, readCases, readFirm, readPanel, writeFirm, type CaseInfo, type FirmInfo } from "@/lib/v4/arbitration";
+import { describeEvent } from "@/lib/v4/describe";
 import { fmtToken } from "@/lib/v4/local";
 import { V4State, type TradeSummary } from "@/lib/v4/tradeIndex";
 
 const FIRMS = [V4.primaryArbitrator, V4.fallbackArbitrator] as const;
 const same = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+
+type Filter = "attention" | "mine" | "open" | "all";
+const FILTERS: { key: Filter; label: string }[] = [
+  { key: "attention", label: "Needs attention" },
+  { key: "mine", label: "Assigned to me" },
+  { key: "open", label: "Open" },
+  { key: "all", label: "All" },
+];
 
 export default function Arbitrate() {
   const { address, isConnected } = useAccount();
@@ -32,6 +43,7 @@ export default function Arbitrate() {
   const trades = useV4Trades();
   const [firmAddr, setFirmAddr] = useState<Address>(FIRMS[0]);
   const [selected, setSelected] = useState<bigint | undefined>();
+  const [filter, setFilter] = useState<Filter | null>(null);
 
   const desk = useQuery({
     queryKey: ["firm", firmAddr],
@@ -44,11 +56,48 @@ export default function Arbitrate() {
     },
   });
 
+  // Deep link: /arbitrate?firm=0x…&case=3
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const f = params.get("firm");
+    const c = params.get("case");
+    if (f && FIRMS.some((x) => same(x, f))) setFirmAddr(FIRMS.find((x) => same(x, f))!);
+    if (c && /^\d+$/.test(c)) {
+      setSelected(BigInt(c));
+      setFilter("all");
+    }
+  }, []);
+
   const firm = desk.data?.firm;
+  const cases = desk.data?.cases ?? [];
+  const panel = desk.data?.panel ?? [];
   const isAdmin = same(address, firm?.admin);
-  const isPanelist = !!desk.data?.panel.some((p) => same(p.panelist, address));
-  const selectedCase = desk.data?.cases.find((c) => c.disputeId === selected) ?? desk.data?.cases[0];
+  const isPanelist = panel.some((p) => same(p.panelist, address));
+  const isPendingAdmin = same(address, firm?.pendingAdmin);
   const tradeOf = (c: CaseInfo) => trades.trades.find((t) => t.tradeId === c.tradeId);
+
+  const needsAttention = (c: CaseInfo) => {
+    if (c.executed || c.escalated) return false;
+    if (c.assignee === zeroAddress) return isAdmin; // the firm must assign it
+    if (!c.hasProposal) return same(c.assignee, address); // the panelist must rule
+    return trades.chainNow >= c.proposedAt + (firm?.reviewPeriod ?? 0); // anyone can execute
+  };
+  const counts: Record<Filter, number> = {
+    attention: cases.filter(needsAttention).length,
+    mine: cases.filter((c) => same(c.assignee, address)).length,
+    open: cases.filter((c) => !c.executed).length,
+    all: cases.length,
+  };
+  const active: Filter = filter ?? (counts.attention > 0 ? "attention" : "open");
+  const visible = cases.filter((c) =>
+    active === "attention" ? needsAttention(c) : active === "mine" ? same(c.assignee, address) : active === "open" ? !c.executed : true
+  );
+  const selectedCase = cases.find((c) => c.disputeId === selected) ?? visible[0] ?? cases[0];
+
+  const select = (id: bigint) => {
+    setSelected(id);
+    window.history.replaceState(null, "", `?firm=${firmAddr}&case=${id}`);
+  };
 
   return (
     <>
@@ -82,36 +131,70 @@ export default function Arbitrate() {
             {!isConnected ? <Chip>not connected</Chip> : isAdmin ? <Chip tone="accent">firm admin</Chip> : null}
             {isPanelist && <Chip tone="info">panelist</Chip>}
             {isConnected && !isAdmin && !isPanelist && <Chip>a visitor — read only</Chip>}
+            {isConnected && counts.attention > 0 && <Chip tone="warn">{counts.attention} case{counts.attention === 1 ? " needs" : "s need"} you</Chip>}
             {IS_TESTNET && <span className="faint">· On this test network the deployer runs both demo firms.</span>}
           </div>
         </Card>
 
-        {desk.error && <Notice tone="error">{errorText(desk.error)}</Notice>}
+        {desk.error && (
+          <Notice tone="error">
+            <div className="row-between">
+              <span>Couldn&apos;t read this firm from the network ({errorText(desk.error)}). Public RPC endpoints rate-limit bursts — retrying usually works.</span>
+              <Button size="sm" busy={desk.isFetching} onClick={() => void desk.refetch()}>Retry</Button>
+            </div>
+          </Notice>
+        )}
 
         {!isConnected ? (
           <ConnectPrompt what="use the arbitration desk" />
         ) : firm ? (
           <div className="split split-trades">
             <div className="stack sticky">
-              <FirmCard firm={firm} isAdmin={isAdmin} onChanged={() => void desk.refetch()} />
-              <PanelCard firm={firm} panel={desk.data!.panel} isAdmin={isAdmin} onChanged={() => void desk.refetch()} />
+              <FirmCard firm={firm} isAdmin={isAdmin} isPendingAdmin={isPendingAdmin} onChanged={() => void desk.refetch()} />
+              <PanelCard firm={firm} panel={panel} isAdmin={isAdmin} onChanged={() => void desk.refetch()} />
             </div>
             <div className="stack">
-              <Card flush title={<>Cases <span className="chip">{firm.caseCount}</span></>} sub="Disputes escalated to this firm by the escrow contract.">
-                {desk.data!.cases.length === 0 ? (
-                  <Empty title="No cases yet">A case appears here when both sides of a disputed trade have paid the arbitration fee.</Empty>
+              <Card
+                flush
+                title={<>Cases <span className="chip">{firm.caseCount}</span></>}
+                sub="Disputes the escrow sent to this firm, newest first."
+                right={
+                  <div className="segmented" role="group" aria-label="Filter cases">
+                    {FILTERS.map(({ key, label }) => (
+                      <button key={key} aria-pressed={active === key} onClick={() => setFilter(key)}>
+                        {label}
+                        <span className={`count${key === "attention" && counts.attention > 0 ? " count-hot" : ""}`}>{counts[key]}</span>
+                      </button>
+                    ))}
+                  </div>
+                }
+              >
+                {cases.length === 0 ? (
+                  <Empty title="No cases yet">
+                    A case arrives when both sides of a disputed trade have paid the arbitration fee. Then: the firm assigns a
+                    panelist, the panelist opens the sealed evidence and proposes a ruling, and after the review period anyone
+                    can execute it.
+                  </Empty>
+                ) : visible.length === 0 ? (
+                  <Empty title="Nothing here">Try another filter.</Empty>
                 ) : (
                   <div className="trade-list">
-                    {desk.data!.cases.map((c) => {
+                    {visible.map((c) => {
                       const t = tradeOf(c);
+                      const escalateAt = escalationDeadline(c, trades.arbitrationTimeout);
+                      const overdue = escalateAt !== null && trades.chainNow > escalateAt;
                       return (
-                        <button key={c.disputeId.toString()} className="trade-row" aria-current={selectedCase?.disputeId === c.disputeId} onClick={() => setSelected(c.disputeId)}>
+                        <button key={c.disputeId.toString()} className="trade-row" aria-current={selectedCase?.disputeId === c.disputeId} onClick={() => select(c.disputeId)}>
                           <div className="row" style={{ gap: 8 }}>
                             <span className="mono strong">Case #{c.disputeId.toString()}</span>
                             <CaseStatus c={c} firm={firm} now={trades.chainNow} />
+                            {needsAttention(c) && <span className="chip chip-warn">your move</span>}
                           </div>
                           <span className="mono small">{t ? `${fmtToken(t.amount)} ${V4.tokenSymbol}` : ""}</span>
-                          <div className="next">Trade #{c.tradeId.toString()} · {c.assignee === zeroAddress ? "unassigned" : `panelist ${shortAddr(c.assignee)}`}</div>
+                          <div className={`next${overdue ? " mine" : ""}`}>
+                            Trade #{c.tradeId.toString()} · {c.assignee === zeroAddress ? "unassigned" : `panelist ${shortAddr(c.assignee)}`}
+                            {escalateAt !== null && (overdue ? " · parties can escalate now" : ` · ${fmtDuration(escalateAt - trades.chainNow)} left to rule`)}
+                          </div>
                         </button>
                       );
                     })}
@@ -124,9 +207,10 @@ export default function Arbitrate() {
                   firm={firm}
                   c={selectedCase}
                   trade={tradeOf(selectedCase)}
-                  panel={desk.data!.panel}
+                  panel={panel}
                   isAdmin={isAdmin}
                   now={trades.chainNow}
+                  arbitrationTimeout={trades.arbitrationTimeout}
                   onChanged={() => { void desk.refetch(); trades.refetch(); }}
                 />
               )}
@@ -144,6 +228,7 @@ export default function Arbitrate() {
 
 function caseStage(c: CaseInfo, firm: FirmInfo, now: number) {
   if (c.executed) return { label: c.proposedRuling === RULING_BUYER ? "Ruled: buyer" : "Ruled: seller", tone: "accent" as const };
+  if (c.escalated) return { label: "Escalated away", tone: "danger" as const };
   if (c.hasProposal) {
     const at = c.proposedAt + firm.reviewPeriod;
     return now >= at ? { label: "Ready to execute", tone: "warn" as const } : { label: `In review · ${fmtDuration(at - now)}`, tone: "info" as const };
@@ -165,15 +250,17 @@ function useFirmWrite(firm: FirmInfo, onChanged: () => void) {
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   async function run(label: string, fn: Parameters<typeof writeFirm>[3], args: readonly unknown[], ok: string) {
-    if (!publicClient || !wallet) return;
+    if (!publicClient || !wallet) return false;
     setBusy(label);
     setMessage(null);
     try {
       await writeFirm(publicClient as never, wallet as never, firm.address, fn, args);
       setMessage({ tone: "ok", text: ok });
       onChanged();
+      return true;
     } catch (e) {
       setMessage({ tone: "error", text: errorText(e) });
+      return false;
     } finally {
       setBusy(null);
     }
@@ -181,18 +268,27 @@ function useFirmWrite(firm: FirmInfo, onChanged: () => void) {
   return { busy, message, run };
 }
 
-function FirmCard({ firm, isAdmin, onChanged }: { firm: FirmInfo; isAdmin: boolean; onChanged: () => void }) {
+function FirmCard({ firm, isAdmin, isPendingAdmin, onChanged }: { firm: FirmInfo; isAdmin: boolean; isPendingAdmin: boolean; onChanged: () => void }) {
   const { busy, message, run } = useFirmWrite(firm, onChanged);
+  const [fee, setFee] = useState("");
+  const [treasury, setTreasury] = useState("");
+  const [newAdmin, setNewAdmin] = useState("");
+  const feeOk = /^\d+(\.\d+)?$/.test(fee.trim()) && Number(fee) >= 0;
+  const addrOk = (v: string) => /^0x[0-9a-fA-F]{40}$/.test(v.trim());
+
   return (
-    <Card title={arbitratorName(firm.address)} sub="Set by the firm; the escrow reads the fee when a dispute starts.">
+    <Card title={arbitratorName(firm.address)} sub="The firm's own contract. EscrowX has no control over it.">
       <div className="stack-sm">
         <KV rows={[
           ["Contract", <Addr key="c" address={firm.address} />],
-          ["Firm admin", <Addr key="a" address={firm.admin} />],
+          ["Firm admin", <Addr key="a" address={firm.admin} you={isAdmin} />],
+          ...(firm.pendingAdmin !== zeroAddress ? [["Pending admin", <Addr key="pa" address={firm.pendingAdmin} you={isPendingAdmin} />] as [React.ReactNode, React.ReactNode]] : []),
+          ["Treasury", <Addr key="t" address={firm.treasury} />],
           ["Fee per side", <span key="f" className="mono">{formatEther(firm.fee)} ETH</span>],
           ["Review period", <span key="r" className="mono">{fmtDuration(firm.reviewPeriod)}</span>],
           ["Fees held", <span key="h" className="mono">{formatEther(firm.accruedFees)} ETH</span>],
         ]} />
+
         {firm.accruedFees > 0n && (
           <div>
             <Button size="sm" busy={busy === "withdraw"} onClick={() => run("withdraw", "withdrawFees", [], "Fees sent to the firm treasury.")}>
@@ -200,7 +296,40 @@ function FirmCard({ firm, isAdmin, onChanged }: { firm: FirmInfo; isAdmin: boole
             </Button>
           </div>
         )}
-        {isAdmin && <p className="help">You administer this firm: you manage the panel, assign cases and can veto a ruling during its review period.</p>}
+        {isPendingAdmin && (
+          <div>
+            <Button size="sm" variant="primary" busy={busy === "accept"} onClick={() => run("accept", "acceptFirmAdmin", [], "You now administer this firm.")}>
+              Accept the admin role
+            </Button>
+          </div>
+        )}
+
+        {isAdmin && (
+          <details>
+            <summary className="small strong" style={{ cursor: "pointer" }}>Firm settings</summary>
+            <div className="stack-sm" style={{ marginTop: 10 }}>
+              <Field label="Arbitration fee" hint="ETH per side" help="Applies to disputes opened from now on; existing cases keep the fee they started with.">
+                <div className="row" style={{ flexWrap: "nowrap" }}>
+                  <input className="input mono" value={fee} onChange={(e) => setFee(e.target.value)} placeholder={formatEther(firm.fee)} inputMode="decimal" />
+                  <Button size="sm" disabled={!feeOk} busy={busy === "fee"} onClick={async () => { if (await run("fee", "setFee", [parseEther(fee.trim())], "Fee updated.")) setFee(""); }}>Set</Button>
+                </div>
+              </Field>
+              <Field label="Treasury" help="Where withdrawn fees go. Anyone may trigger the withdrawal, but only this address receives.">
+                <div className="row" style={{ flexWrap: "nowrap" }}>
+                  <input className="input mono" value={treasury} onChange={(e) => setTreasury(e.target.value)} placeholder={firm.treasury} />
+                  <Button size="sm" disabled={!addrOk(treasury)} busy={busy === "treasury"} onClick={async () => { if (await run("treasury", "setTreasury", [treasury.trim()], "Treasury updated.")) setTreasury(""); }}>Set</Button>
+                </div>
+              </Field>
+              <Field label="Transfer admin" help="Two steps: you nominate, they accept. Nothing changes until they do.">
+                <div className="row" style={{ flexWrap: "nowrap" }}>
+                  <input className="input mono" value={newAdmin} onChange={(e) => setNewAdmin(e.target.value)} placeholder="0x… new admin" />
+                  <Button size="sm" variant="danger" disabled={!addrOk(newAdmin)} busy={busy === "admin"} onClick={async () => { if (await run("admin", "transferFirmAdmin", [newAdmin.trim()], "Nominated. They must accept it.")) setNewAdmin(""); }}>Nominate</Button>
+                </div>
+              </Field>
+            </div>
+          </details>
+        )}
+        {isAdmin && <p className="help">You administer this firm: manage the panel, assign cases, and veto a ruling during its review period.</p>}
         {message && <Notice tone={message.tone}>{message.text}</Notice>}
       </div>
     </Card>
@@ -272,13 +401,14 @@ function PanelCard({ firm, panel, isAdmin, onChanged }: { firm: FirmInfo; panel:
 
 // ─── Case ─────────────────────────────────────────────────────────────────────
 
-function CaseDetail({ firm, c, trade, panel, isAdmin, now, onChanged }: {
+function CaseDetail({ firm, c, trade, panel, isAdmin, now, arbitrationTimeout, onChanged }: {
   firm: FirmInfo;
   c: CaseInfo;
   trade?: TradeSummary;
   panel: { panelist: Address; key: Hex }[];
   isAdmin: boolean;
   now: number;
+  arbitrationTimeout: number;
   onChanged: () => void;
 }) {
   const { address } = useEscrowX();
@@ -289,15 +419,19 @@ function CaseDetail({ firm, c, trade, panel, isAdmin, now, onChanged }: {
   const [vetoNote, setVetoNote] = useState("");
   const isAssignee = same(c.assignee, address);
   const reviewEnds = c.proposedAt + firm.reviewPeriod;
+  const escalateAt = escalationDeadline(c, arbitrationTimeout);
+  const overdue = escalateAt !== null && now > escalateAt;
   // After escalation the fallback firm owns the dispute; the escrow ignores rulings from the first firm.
   const escalation = trade?.events.find((e) => e.name === "Escalated");
-  const movedAway = !!escalation && !same(escalation.args.fallbackArbitrator as string, firm.address);
+  const movedAway = c.escalated || (!!escalation && !same(escalation.args.fallbackArbitrator as string, firm.address));
   const tradeOpen = (!trade || trade.state === V4State.DISPUTED) && !movedAway;
   // A panelist can't rule on a trade they're part of; the contract enforces this too.
   const eligible = panel.filter((p) => !trade || (!same(p.panelist, trade.buyer) && !same(p.panelist, trade.seller)));
   const paidCommitment = trade?.events.find((e) => e.name === "PaymentMarked")?.args.evidenceCommitment as Hex | undefined;
   const evidence = (trade?.events ?? []).filter((e) => e.name === "Evidence" && same(e.args.arbitrator as string, firm.address));
   const stage = caseStage(c, firm, now);
+  const partyLabel = (addr: unknown) =>
+    !trade || typeof addr !== "string" ? "" : same(addr, trade.buyer) ? "buyer" : same(addr, trade.seller) ? "seller" : "";
 
   return (
     <div className="stack">
@@ -316,16 +450,27 @@ function CaseDetail({ firm, c, trade, panel, isAdmin, now, onChanged }: {
           )}
 
           {movedAway && !c.executed && (
-            <Notice tone="warn">This firm missed its deadline and the case was escalated to {arbitratorName(escalation!.args.fallbackArbitrator as string)}. Nothing to decide here.</Notice>
+            <Notice tone="warn">
+              This case was escalated to the escrow&apos;s fallback arbitrator{escalation ? ` (${arbitratorName(escalation.args.fallbackArbitrator as string)})` : ""}. Nothing to decide here.
+            </Notice>
           )}
           {!tradeOpen && !movedAway && !c.executed && (
             <Notice tone="info">This trade already closed without a ruling (one side conceded or it timed out). Nothing to decide.</Notice>
           )}
+          {tradeOpen && escalateAt !== null && (
+            <Notice tone={overdue ? "error" : now > escalateAt - 86400 ? "warn" : "info"}>
+              {overdue
+                ? `Overdue: either party can now move this case to the escrow's fallback arbitrator, and this firm loses it.`
+                : `This firm has ${fmtDuration(escalateAt - now)} left to rule (until ${fmtTs(escalateAt)}). After that either party can move the case to the fallback arbitrator.`}
+            </Notice>
+          )}
 
           <KV rows={[
+            ["Dispute opened by", c.opener === zeroAddress ? "—" : <span key="o" className="row" style={{ gap: 6, justifyContent: "flex-end" }}><Addr address={c.opener} />{partyLabel(c.opener) && <Chip>{partyLabel(c.opener)}</Chip>}</span>],
             ["Assigned panelist", c.assignee === zeroAddress ? "—" : <Addr key="p" address={c.assignee} you={isAssignee} />],
             ["Proposed ruling", c.hasProposal || c.executed ? (c.proposedRuling === RULING_BUYER ? "Buyer — release the crypto" : "Seller — return the crypto") : "—"],
             ...(c.hasProposal && !c.executed ? [["Review ends", <span key="r" className="mono">{fmtTs(reviewEnds)}</span>] as [React.ReactNode, React.ReactNode]] : []),
+            ["Evidence submitted", `${evidence.length}`],
             ["Status", stage.label],
           ]} />
 
@@ -388,7 +533,7 @@ function CaseDetail({ firm, c, trade, panel, isAdmin, now, onChanged }: {
           {c.hasProposal && !c.executed && now >= reviewEnds && tradeOpen && (
             <div className="action action-primary">
               <h3>Execute the ruling</h3>
-              <p className="small muted">The review period is over with no veto. Anyone can execute it: the escrow then {c.proposedRuling === RULING_BUYER ? "releases the crypto to the buyer" : "returns the crypto to the seller"} and settles the fees (the loser&apos;s fee pays the firm).</p>
+              <p className="small muted">The review period is over with no veto. Anyone can execute it: the escrow then {c.proposedRuling === RULING_BUYER ? "releases the crypto to the buyer" : "returns the crypto to the seller"} and settles the fees — the winner gets theirs back and the loser&apos;s pays this firm.</p>
               <div>
                 <Button variant="accent" busy={busy === "execute"} onClick={() => run("execute", "executeRuling", [c.disputeId], "Ruling executed on the escrow.")}>Execute ruling</Button>
               </div>
@@ -399,19 +544,42 @@ function CaseDetail({ firm, c, trade, panel, isAdmin, now, onChanged }: {
         </div>
       </Card>
 
-      {isAssignee && (
-        <Card title="Sealed evidence" sub="Only you can open these. Parties send you the encrypted files through the firm's case channel.">
+      <Card title="Evidence" sub={isAssignee ? "Only you can open these. Parties send you the encrypted files through the firm's case channel." : "Sealed to the assigned panelist. Nobody else can open it — not the firm, not EscrowX."}>
+        {evidence.length === 0 ? (
+          <p className="small muted p0">Nothing submitted yet{c.assignee === zeroAddress ? " — parties can seal evidence once a panelist is assigned." : "."}</p>
+        ) : isAssignee ? (
           <MessagingGate reason="open evidence sealed to you">
-            {evidence.length === 0 ? (
-              <p className="small muted p0">Nothing submitted yet. Parties can seal evidence to you now that the case is assigned.</p>
-            ) : (
-              <div className="stack">
-                {evidence.map((e) => (
-                  <EvidenceItem key={`${e.txHash}-${e.logIndex}`} uri={e.args.evidence as string} party={e.args.party as Address} trade={trade!} submittedAt={e.timestamp} paidCommitment={paidCommitment} />
-                ))}
-              </div>
-            )}
+            <div className="stack">
+              {evidence.map((e) => (
+                <EvidenceItem key={`${e.txHash}-${e.logIndex}`} uri={e.args.evidence as string} party={e.args.party as Address} trade={trade!} submittedAt={e.timestamp} paidCommitment={paidCommitment} />
+              ))}
+            </div>
           </MessagingGate>
+        ) : (
+          <div className="stack-sm">
+            {evidence.map((e) => (
+              <div key={`${e.txHash}-${e.logIndex}`} className="row-between small">
+                <span><Addr address={e.args.party as Address} /> {partyLabel(e.args.party) && <Chip>{partyLabel(e.args.party)}</Chip>}</span>
+                <span className="tiny faint">{e.timestamp ? fmtTs(e.timestamp) : ""} · <TxLink hash={e.txHash} /></span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {trade && (
+        <Card title="Trade history" sub="Straight from the escrow contract — the same record both parties see.">
+          <ol className="timeline">
+            {trade.events.map((e) => (
+              <li key={`${e.txHash}-${e.logIndex}`}>
+                <span className="node" aria-hidden />
+                <div className="stack-xs">
+                  <span className="small">{describeEvent(e)}</span>
+                  <span className="tiny faint">{e.timestamp ? fmtTs(e.timestamp) : "—"} · <TxLink hash={e.txHash} /></span>
+                </div>
+              </li>
+            ))}
+          </ol>
         </Card>
       )}
     </div>

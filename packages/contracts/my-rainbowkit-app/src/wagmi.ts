@@ -27,6 +27,16 @@ const connectors = connectorsForWallets(
 export const wagmiConfig = createConfig({
   chains,
   connectors,
-  transports: { [CHAIN.id]: http(CHAIN.rpcUrls.default.http[0]) },
+  // Public RPC endpoints rate-limit bursts, so reads are batched into as few HTTP requests as possible:
+  // eth_calls are aggregated through multicall, the rest are sent as JSON-RPC batches, and failures back off.
+  batch: { multicall: { wait: 32 } },
+  transports: {
+    [CHAIN.id]: http(CHAIN.rpcUrls.default.http[0], {
+      batch: { wait: 32 },
+      retryCount: 5,
+      retryDelay: 400,
+      timeout: 20_000,
+    }),
+  },
   ssr: true,
 });
