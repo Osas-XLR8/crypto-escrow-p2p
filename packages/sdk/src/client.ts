@@ -52,6 +52,25 @@ export type OnchainDispute = {
   pool: bigint;
 };
 
+/** A multi-transaction call reports each wallet prompt before it opens, so the UI can say "step 2 of 3". */
+export interface Step {
+  index: number;
+  total: number;
+  label: string;
+}
+
+export interface StepOptions {
+  onStep?: (step: Step) => void;
+}
+
+function steps(opts: StepOptions, labels: string[]): () => void {
+  let index = 0;
+  return () => {
+    index++;
+    opts.onStep?.({ index, total: labels.length, label: labels[index - 1]! });
+  };
+}
+
 export class EscrowV4Client {
   constructor(
     readonly publicClient: PublicClient,
@@ -160,8 +179,11 @@ export class EscrowV4Client {
   }
 
   /** Approves exactly `amount` (never unlimited) and deposits it into the seller vault. */
-  async deposit(token: Address, amount: bigint) {
+  async deposit(token: Address, amount: bigint, opts: StepOptions = {}) {
+    const step = steps(opts, ["Approve the escrow to move your tokens", "Move the tokens into your vault"]);
+    step();
     await this.approveExactly(token, amount);
+    step();
     return this.write("deposit", [token, amount]);
   }
 
@@ -204,14 +226,22 @@ export class EscrowV4Client {
    * - buy offer (you are the seller): locked from your vault first, the shortfall from your wallet —
    *   this approves exactly that shortfall (never an unlimited allowance) before taking.
    */
-  async takeOffer(offer: AnyOffer, signature: Hex, amount: bigint): Promise<bigint> {
+  async takeOffer(offer: AnyOffer, signature: Hex, amount: bigint, opts: StepOptions = {}): Promise<bigint> {
     let receipt;
     if (isBuyOffer(offer)) {
       const { account } = this.wallet();
       const free = await this.freeBalance(account.address, offer.token);
-      if (free < amount) await this.approveExactly(offer.token, amount - free);
+      const shortfall = free < amount ? amount - free : 0n;
+      const step = steps(opts, shortfall > 0n ? ["Approve the escrow to move your tokens", "Lock your crypto in escrow"] : ["Lock your crypto in escrow"]);
+      if (shortfall > 0n) {
+        step();
+        await this.approveExactly(offer.token, shortfall);
+      }
+      step();
       receipt = await this.write("takeBuyOffer", [offer, signature, amount]);
     } else {
+      const step = steps(opts, ["Lock the seller's crypto in escrow"]);
+      step();
       receipt = await this.write("takeOffer", [offer, signature, amount]);
     }
     const [opened] = parseEventLogs({ abi: escrowCoreV4Abi, eventName: "TradeOpened", logs: receipt.logs });

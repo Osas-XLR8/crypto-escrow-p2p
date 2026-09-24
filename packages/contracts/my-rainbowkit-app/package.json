@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "sync:v4": "node scripts/sync-v4-env.mjs"
+    "sync:v4": "node scripts/sync-v4-env.mjs",
+    "test": "vitest run"
   },
   "dependencies": {
     "@escrowx/sdk": "file:../../sdk",
@@ -24,6 +25,7 @@
     "@types/node": "^22.19.1",
     "@types/react": "^19.1.8",
     "eslint-config-next": "^15.1.7",
-    "typescript": "5.5.4"
+    "typescript": "5.5.4",
+    "vitest": "^3.2.7"
   }
 }

@@ -20,6 +20,7 @@ import {
 } from "@escrowx/sdk";
 import { useEscrowX } from "@/context/EscrowX";
 import { useFirmPanels } from "@/hooks/useFirmPanels";
+import { Reputation, useReputation } from "@/components/v4/Reputation";
 import { V4, arbitratorName } from "@/config/v4";
 import { StateBadge } from "@/components/StateBadge";
 import { Addr, Button, Card, Field, KV, Notice, TxLink, errorText } from "@/components/ui";
@@ -41,6 +42,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
 }) {
   const { address, client, book, identity } = useEscrowX();
   const { status: panelStatus } = useFirmPanels();
+  const reputationOf = useReputation();
   const messages = useMessages();
   const publicClient = usePublicClient();
   const id = summary.tradeId;
@@ -145,6 +147,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   const escalateAt = startedAt + arbitrationTimeout;
   const terminalAt = startedAt + (d.escalated ? arbitrationTimeout : 2 * arbitrationTimeout);
   const openerIsMe = me === d.opener.toLowerCase();
+  const counterparty = isBuyer ? t.seller : isSeller ? t.buyer : undefined;
 
   const fiat = terms.data ? fmtFiat(t.amount, terms.data.price, terms.data.fiatCurrency) : null;
 
@@ -356,7 +359,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
       <span key="a">
         {arbitratorName(t.activeArbitrator !== zeroAddress ? t.activeArbitrator : t.arbitrator)}
         {d.escalated ? " (fallback)" : ""}
-        {activePanel.size !== undefined && <span className="faint"> · {activePanel.size} panelist{activePanel.size === 1 ? "" : "s"}</span>}
+        {activePanel.panel !== undefined && <span className="faint"> · {activePanel.panel} panelist{activePanel.panel === 1 ? "" : "s"}</span>}
       </span>,
     ],
   ];
@@ -382,6 +385,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
               </div>
             )}
             <div className="small muted row" style={{ gap: 6 }}>{roleLine}</div>
+            {counterparty && <Reputation stats={reputationOf(counterparty)} address={counterparty} detailed />}
           </div>
 
           <Progress state={t.state} summary={summary} />

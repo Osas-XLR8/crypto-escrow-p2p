@@ -7,17 +7,21 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { erc20Abi } from "viem";
+import { erc20Abi, formatEther } from "viem";
 import { usePublicClient } from "wagmi";
 import { buildCancelEvent, type OfferSide, type ParsedOffer } from "@escrowx/sdk";
 import { useEscrowX } from "@/context/EscrowX";
 import { useFirmPanels } from "@/hooks/useFirmPanels";
+import { Reputation, useReputation } from "@/components/v4/Reputation";
 import { CHAIN_ID, FIAT_CURRENCIES, RELAYS, V4, arbitratorName } from "@/config/v4";
 import { Addr, Button, Card, Chip, Empty, Notice, errorText } from "@/components/ui";
 import { fmtDuration } from "@/lib/format";
 import { fmtFiat, fmtToken, parseTokenInput, rememberTradeTerms, termsFromOffer } from "@/lib/v4/local";
 
 /** Rejections that mean "someone tried to fake or tamper with an offer" (not just old or for another deployment). */
+/** Below this, a "median" is just one person's opinion. */
+const MIN_FOR_MEDIAN = 3;
+
 const FORGERY = new Set(["bad_nostr_signature", "malformed_content", "terms_mismatch", "bad_offer_signature", "bad_binding", "binding_mismatch", "tag_mismatch"]);
 const SYM = V4.tokenSymbol;
 
@@ -103,6 +107,14 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
   });
   const shown = mode === "mine" ? offers : live;
 
+  // A price means nothing on its own: 1,592 NGN is a bargain or a rip-off depending on what everyone else is
+  // asking. The median of the live offers on this side is the most honest reference available without
+  // trusting a price feed — it's the same data on screen, and it can't be moved by one outlier.
+  const prices = shown.map((o) => Number(o.terms.price)).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
+  const median = prices.length >= MIN_FOR_MEDIAN
+    ? prices.length % 2 ? prices[(prices.length - 1) / 2]! : (prices[prices.length / 2 - 1]! + prices[prices.length / 2]!) / 2
+    : undefined;
+
   const content = (
     <>
       {(relayError || forged > 0) && (
@@ -130,11 +142,23 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
           </Empty>
         )
       )}
+      {mode === "market" && median !== undefined && (
+        <div className="row-between small" style={{ padding: "12px 18px", borderBottom: "1px solid var(--border)" }}>
+          <span className="faint">
+            Market median · {intent === "buy" ? "asks" : "bids"} on {SYM}/{currency}
+          </span>
+          <span className="mono strong" title={`Middle price of the ${prices.length} live offers listed here. Not a price feed — it's this market, right now.`}>
+            {median.toLocaleString("en-US")} {currency} <span className="faint">· {prices.length} offers</span>
+          </span>
+        </div>
+      )}
       <div>
         {shown.map((o, i) => (
           <OfferRow
             key={o.offerHash}
             offer={o}
+            reference={median}
+            intent={intent}
             best={mode === "market" && i === 0 && shown.length > 1}
             remaining={remaining.data?.[o.offerHash]}
             funds={funds.data}
@@ -190,9 +214,12 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
   );
 }
 
-function OfferRow({ offer, best, remaining, funds, isMine, onTaken, onChanged }: {
+function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, onTaken, onChanged }: {
   offer: ParsedOffer;
   best: boolean;
+  /** Median price of the offers listed beside this one, when there are enough to mean anything. */
+  reference?: number;
+  intent?: Intent;
   remaining?: bigint;
   funds?: { vault: bigint; wallet: bigint };
   isMine: boolean;
@@ -201,10 +228,12 @@ function OfferRow({ offer, best, remaining, funds, isMine, onTaken, onChanged }:
 }) {
   const { address, client, book, identity, unlockMessaging } = useEscrowX();
   const { status: panelStatus } = useFirmPanels();
+  const reputationOf = useReputation();
   const { offer: o, terms, side } = offer;
-  const panel = panelStatus(o.arbitrator);
+  const firm = panelStatus(o.arbitrator);
   const [amount, setAmount] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{ index: number; total: number; label: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const isBuyOffer = side === "buy";
@@ -218,22 +247,48 @@ function OfferRow({ offer, best, remaining, funds, isMine, onTaken, onChanged }:
   const payMinutes = Number(o.paymentWindow) / 60;
   const fromWallet = isBuyOffer && parsed && funds && parsed > funds.vault ? parsed - funds.vault : 0n;
 
+  // Cheaper is better when you're buying, dearer when you're selling; 0.5% either way is just noise.
+  const vsMarket = (() => {
+    if (!reference || !intent) return null;
+    const diff = (Number(terms.price) - reference) / reference;
+    if (Math.abs(diff) < 0.005) return { text: "at market", good: false, bad: false };
+    const favourable = intent === "buy" ? diff < 0 : diff > 0;
+    return {
+      text: `${diff > 0 ? "+" : ""}${(diff * 100).toFixed(1)}% vs market`,
+      good: favourable,
+      bad: !favourable && Math.abs(diff) >= 0.03,
+    };
+  })();
+
+  // Everything the wallet will ask for, in order, so nobody is surprised by a second or third prompt.
+  const plan = [
+    ...(identity ? [] : ["Sign to unlock private messaging (free)"]),
+    ...(fromWallet > 0n ? [`Approve ${fmtToken(fromWallet)} ${SYM}`] : []),
+    isBuyOffer ? "Lock your crypto in escrow" : "Lock the seller's crypto in escrow",
+  ];
+
   async function take() {
     if (!client || !parsed) return;
     setError(null);
+    const before = identity ? 0 : 1;
+    const total = plan.length;
     try {
       if (!identity) {
         // Needed for the private chat (payment details); do it first so nobody is stuck mid-trade.
         setBusy("unlock");
+        setProgress({ index: 1, total, label: plan[0]! });
         if (!(await unlockMessaging())) return;
       }
       setBusy("take");
-      const tradeId = await client.takeOffer(o, offer.signature, parsed);
+      const tradeId = await client.takeOffer(o, offer.signature, parsed, {
+        onStep: (step) => setProgress({ index: before + step.index, total, label: step.label }),
+      });
       onTaken(tradeId);
     } catch (e) {
       setError(errorText(e));
     } finally {
       setBusy(null);
+      setProgress(null);
     }
   }
 
@@ -260,6 +315,11 @@ function OfferRow({ offer, best, remaining, funds, isMine, onTaken, onChanged }:
           <span className="eyebrow">{isBuyOffer ? "Pays" : "Price"} {best && <span className="accent">· best</span>}</span>
           <div className="big-num">{Number(terms.price).toLocaleString("en-US")}</div>
           <span className="tiny faint mono">{terms.fiatCurrency} per {terms.tokenSymbol}</span>
+          {vsMarket && (
+            <span className={`tiny mono ${vsMarket.good ? "accent" : vsMarket.bad ? "warn" : "faint"}`} title={`Median of the live offers here: ${reference!.toLocaleString("en-US")} ${terms.fiatCurrency}`}>
+              {vsMarket.text}
+            </span>
+          )}
         </div>
 
         <div className="offer-meta">
@@ -269,13 +329,14 @@ function OfferRow({ offer, best, remaining, funds, isMine, onTaken, onChanged }:
             <Chip tone="accent" title={`The ${isBuyOffer ? "buyer" : "seller"}'s wallet signed this offer and its terms`}>✓ signed</Chip>
             {expiresIn <= 0 && <Chip tone="danger">expired</Chip>}
           </div>
+          <Reputation stats={reputationOf(offer.maker)} />
           <div className="row" style={{ gap: 6 }}>
             <span className="tiny faint">{isBuyOffer ? "Pays with" : "Accepts"}</span>
             {terms.paymentMethods.map((m) => <Chip key={m}>{m}</Chip>)}
           </div>
           <div className="small faint">
             {isBuyOffer ? `Buyer pays within ${payMinutes} min` : `Pay within ${payMinutes} min`} · Disputes: {arbitratorName(o.arbitrator)}
-            {!panel.staffed && (
+            {!firm.staffed && (
               <> <Chip tone="warn" title="This firm has no panelists registered, so it cannot assign a dispute to anyone. A dispute here would only end on the escrow's timeout.">no panel yet</Chip></>
             )}
             {" · "}{expiresIn > 0 ? `expires in ${fmtDuration(expiresIn)}` : "expired"}
@@ -310,15 +371,17 @@ function OfferRow({ offer, best, remaining, funds, isMine, onTaken, onChanged }:
               <Button variant="accent" block onClick={() => void take()} disabled={!address || !amountOk || !client || expiresIn <= 0} busy={!!busy}>
                 {!address
                   ? `Connect a wallet to ${actionLabel.toLowerCase()}`
-                  : busy === "unlock"
-                    ? "Unlock messaging in wallet…"
-                    : busy === "take"
-                      ? isBuyOffer ? "Locking your crypto…" : "Locking seller's crypto…"
-                      : parsed && !sellerCanFund
-                        ? `Not enough ${SYM}`
-                        : amountOk
-                          ? `${actionLabel} ${amount} ${terms.tokenSymbol}`
-                          : actionLabel}
+                  : progress && progress.total > 1
+                    ? `Step ${progress.index} of ${progress.total} · ${progress.label}`
+                    : busy === "unlock"
+                      ? "Unlock messaging in wallet…"
+                      : busy === "take"
+                        ? isBuyOffer ? "Locking your crypto…" : "Locking seller's crypto…"
+                          : parsed && !sellerCanFund
+                          ? `Not enough ${SYM}`
+                          : amountOk
+                            ? `${actionLabel} ${amount} ${terms.tokenSymbol}`
+                            : actionLabel}
               </Button>
             </>
           )}
@@ -327,6 +390,23 @@ function OfferRow({ offer, best, remaining, funds, isMine, onTaken, onChanged }:
 
       {!isMine && amountOk && parsed && (
         <div className="buy-summary">
+          <div>
+            <span className="faint">EscrowX fee</span>
+            <span className="mono strong">none · 0%</span>
+          </div>
+          <div className="faint tiny">
+            <span>
+              The escrow takes no cut of this trade. You pay the network&apos;s gas for your own transactions, and
+              nothing else unless it goes to dispute — then each side puts up{" "}
+              <span className="mono">{firm.fee === undefined ? "the firm's fee" : `${formatEther(firm.fee)} ETH`}</span>{" "}
+              for {arbitratorName(o.arbitrator)}, refunded to whoever wins.
+            </span>
+          </div>
+          {plan.length > 1 && (
+            <div className="faint tiny">
+              <span>Your wallet will ask {plan.length} times: {plan.map((step, i) => `${i + 1}. ${step}`).join(" · ")}.</span>
+            </div>
+          )}
           {isBuyOffer ? (
             <>
               <div><span className="faint">The buyer pays you</span><span className="mono strong">{fmtFiat(parsed, terms.price, terms.fiatCurrency)}</span></div>
