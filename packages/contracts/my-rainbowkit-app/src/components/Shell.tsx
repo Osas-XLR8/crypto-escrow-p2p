@@ -4,16 +4,20 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
-import { useAccount, useChainId, useSwitchChain } from "wagmi";
+import { useAccount, useSwitchChain } from "wagmi";
+import { useKeepConnected } from "@/hooks/useKeepConnected";
 import { CHAIN, CHAIN_ID, IS_LOCAL, IS_TESTNET, V4, explorerAddress } from "@/config/v4";
 import { useTheme } from "@/context/Theme";
+import { useEscrowX } from "@/context/EscrowX";
 import { Button, Notice } from "@/components/ui";
 
 export function Shell({ nav, onBrand, children }: { nav?: ReactNode; onBrand?: () => void; children: ReactNode }) {
-  const { isConnected } = useAccount();
-  const chainId = useChainId();
+  // `chain` is undefined when the wallet sits on a network this app doesn't know — the case a plain chain-id
+  // comparison misses, and the one that silently makes every read look like "nothing here".
+  const { isConnected, chain } = useAccount();
   const { switchChain, isPending: switching } = useSwitchChain();
-  const wrongChain = isConnected && chainId !== CHAIN_ID;
+  useKeepConnected();
+  const wrongChain = isConnected && chain?.id !== CHAIN_ID;
 
   return (
     <div className="shell">
@@ -34,6 +38,7 @@ export function Shell({ nav, onBrand, children }: { nav?: ReactNode; onBrand?: (
           </Link>
           {nav}
           <div className="header-right">
+            <MessagingLock />
             <ThemeToggle />
             <ConnectButton showBalance={false} chainStatus="icon" accountStatus={{ smallScreen: "avatar", largeScreen: "address" }} />
           </div>
@@ -45,7 +50,10 @@ export function Shell({ nav, onBrand, children }: { nav?: ReactNode; onBrand?: (
           {wrongChain && (
             <Notice tone="warn">
               <div className="row-between">
-                <span>Your wallet is on another network. EscrowX runs on <strong>{CHAIN.name}</strong>.</span>
+                <span>
+                  Your wallet is on {chain?.name ?? "an unsupported network"}. EscrowX runs on <strong>{CHAIN.name}</strong> —
+                  switch to see your trades and act on them.
+                </span>
                 <Button size="sm" variant="primary" busy={switching} onClick={() => switchChain({ chainId: CHAIN_ID })}>Switch to {CHAIN.name}</Button>
               </div>
             </Notice>
@@ -61,7 +69,7 @@ export function Shell({ nav, onBrand, children }: { nav?: ReactNode; onBrand?: (
             Pre-audit software — don&apos;t use with real funds.
           </span>
           <span className="row" style={{ gap: 14 }}>
-            <Link href="/arbitrate" className="mono">arbitration desk →</Link>
+            <Link href="/arbitrate/" className="mono">arbitration desk →</Link>
             {explorerAddress(V4.escrow) ? (
               <a href={explorerAddress(V4.escrow)!} target="_blank" rel="noreferrer" className="mono">contract ↗</a>
             ) : (
@@ -72,6 +80,22 @@ export function Shell({ nav, onBrand, children }: { nav?: ReactNode; onBrand?: (
         </div>
       </footer>
     </div>
+  );
+}
+
+/** Shown once messaging is unlocked, so the key is never held without a way to drop it. */
+function MessagingLock() {
+  const { identity, lockMessaging, keptOnDevice } = useEscrowX();
+  if (!identity) return null;
+  return (
+    <button
+      className="btn btn-ghost btn-icon"
+      onClick={lockMessaging}
+      aria-label="Lock messaging"
+      title={`Messaging unlocked${keptOnDevice ? " and kept on this device for 7 days" : " for this browser"} — click to forget the key`}
+    >
+      🔓
+    </button>
   );
 }
 

@@ -12,7 +12,7 @@ import { claimFaucet } from "@/lib/v4/faucet";
 const DISMISS_KEY = "escrowx:onboarding-dismissed";
 
 export function GettingStarted() {
-  const { address, identity, unlockMessaging, unlocking } = useEscrowX();
+  const { address, identity, unlockMessaging, unlocking, keptOnDevice, lockMessaging } = useEscrowX();
   const publicClient = usePublicClient();
   const { data: walletClient } = useWalletClient();
   const gas = useBalance({ address, query: { refetchInterval: 10_000 } });
@@ -105,9 +105,19 @@ export function GettingStarted() {
           <span className={`tick${identity ? " done" : ""}`}>{identity ? "✓" : "3"}</span>
           <div className="stack-xs">
             <span className="strong small">Unlock private messaging</span>
-            <span className="tiny faint">Two free signatures. This is how payment details reach you, encrypted.</span>
+            <span className="tiny faint">
+              {identity
+                ? keptOnDevice
+                  ? "Unlocked and kept on this device for 7 days — reloads and new tabs won't ask again."
+                  : "Unlocked for this browser session — reloads and new tabs won't ask again."
+                : "Two free signatures. This is how payment details reach you, encrypted."}
+            </span>
           </div>
-          {!identity && <Button size="sm" busy={unlocking} onClick={() => void unlockMessaging()}>Unlock</Button>}
+          {identity ? (
+            <Button size="sm" variant="ghost" onClick={lockMessaging} title="Forget the messaging key on this browser">Lock</Button>
+          ) : (
+            <Button size="sm" busy={unlocking} onClick={() => void unlockMessaging()}>Unlock</Button>
+          )}
         </li>
       </ol>
       {error && <div style={{ padding: "0 18px 14px" }}><Notice tone="error">{error}</Notice></div>}

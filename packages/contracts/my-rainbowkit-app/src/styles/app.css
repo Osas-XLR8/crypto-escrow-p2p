@@ -328,6 +328,8 @@ select.input { padding-right: 28px; }
 .step.done .step-label { color: var(--text-2); }
 .step.current .step-bar { background: var(--text); }
 .step.current .step-label { color: var(--text); font-weight: 600; }
+.step.skipped .step-bar { background: repeating-linear-gradient(90deg, var(--surface-3) 0 4px, transparent 4px 8px); }
+.step.skipped .step-label { color: var(--text-3); text-decoration: line-through; }
 .step.bad .step-bar { background: var(--danger); }
 .step.bad .step-label { color: var(--danger); }
 

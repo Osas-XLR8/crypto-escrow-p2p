@@ -11,6 +11,7 @@ import { erc20Abi } from "viem";
 import { usePublicClient } from "wagmi";
 import { buildCancelEvent, type OfferSide, type ParsedOffer } from "@escrowx/sdk";
 import { useEscrowX } from "@/context/EscrowX";
+import { useFirmPanels } from "@/hooks/useFirmPanels";
 import { CHAIN_ID, FIAT_CURRENCIES, RELAYS, V4, arbitratorName } from "@/config/v4";
 import { Addr, Button, Card, Chip, Empty, Notice, errorText } from "@/components/ui";
 import { fmtDuration } from "@/lib/format";
@@ -199,7 +200,9 @@ function OfferRow({ offer, best, remaining, funds, isMine, onTaken, onChanged }:
   onChanged: () => void;
 }) {
   const { address, client, book, identity, unlockMessaging } = useEscrowX();
+  const { status: panelStatus } = useFirmPanels();
   const { offer: o, terms, side } = offer;
+  const panel = panelStatus(o.arbitrator);
   const [amount, setAmount] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -271,7 +274,11 @@ function OfferRow({ offer, best, remaining, funds, isMine, onTaken, onChanged }:
             {terms.paymentMethods.map((m) => <Chip key={m}>{m}</Chip>)}
           </div>
           <div className="small faint">
-            {isBuyOffer ? `Buyer pays within ${payMinutes} min` : `Pay within ${payMinutes} min`} · Disputes: {arbitratorName(o.arbitrator)} · {expiresIn > 0 ? `expires in ${fmtDuration(expiresIn)}` : "expired"}
+            {isBuyOffer ? `Buyer pays within ${payMinutes} min` : `Pay within ${payMinutes} min`} · Disputes: {arbitratorName(o.arbitrator)}
+            {!panel.staffed && (
+              <> <Chip tone="warn" title="This firm has no panelists registered, so it cannot assign a dispute to anyone. A dispute here would only end on the escrow's timeout.">no panel yet</Chip></>
+            )}
+            {" · "}{expiresIn > 0 ? `expires in ${fmtDuration(expiresIn)}` : "expired"}
           </div>
           {terms.conditions && <p className="offer-terms">{terms.conditions}</p>}
         </div>

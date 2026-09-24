@@ -94,6 +94,9 @@ export function arbitratorName(addr: string): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
+/** Every arbitration firm this deployment knows about, primary first. */
+export const FIRMS = [V4.primaryArbitrator, V4.fallbackArbitrator] as const;
+
 export const explorerTx = (hash: string) => (EXPLORER ? `${EXPLORER}/tx/${hash}` : null);
 export const explorerAddress = (addr: string) => (EXPLORER ? `${EXPLORER}/address/${addr}` : null);
 

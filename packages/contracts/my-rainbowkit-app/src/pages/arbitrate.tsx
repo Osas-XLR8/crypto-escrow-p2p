@@ -14,8 +14,9 @@ import { formatEther, keccak256, parseEther, toBytes, zeroAddress, zeroHash, typ
 import { useAccount, usePublicClient, useWalletClient } from "wagmi";
 import { adapterKeyFromNostrPubkey, decryptEvidence, keyFromHex, openEvidenceKey, parseEvidenceUri } from "@escrowx/sdk";
 import { useEscrowX } from "@/context/EscrowX";
-import { IS_TESTNET, V4, arbitratorName } from "@/config/v4";
-import { ConnectPrompt, Shell } from "@/components/Shell";
+import { FIRMS, IS_TESTNET, V4, arbitratorName } from "@/config/v4";
+import { ConnectButton } from "@rainbow-me/rainbowkit";
+import { Shell } from "@/components/Shell";
 import { StateBadge } from "@/components/StateBadge";
 import { Addr, Button, Card, Chip, CopyButton, Empty, Field, KV, Notice, TxLink, errorText } from "@/components/ui";
 import { MessagingGate } from "@/components/v4/MessagingGate";
@@ -26,7 +27,6 @@ import { describeEvent } from "@/lib/v4/describe";
 import { fmtToken } from "@/lib/v4/local";
 import { V4State, type TradeSummary } from "@/lib/v4/tradeIndex";
 
-const FIRMS = [V4.primaryArbitrator, V4.fallbackArbitrator] as const;
 const same = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 
 type Filter = "attention" | "mine" | "open" | "all";
@@ -128,12 +128,21 @@ export default function Arbitrate() {
         >
           <div className="row small">
             <span className="faint">You are</span>
-            {!isConnected ? <Chip>not connected</Chip> : isAdmin ? <Chip tone="accent">firm admin</Chip> : null}
+            {!isConnected ? <Chip>reading as a visitor</Chip> : isAdmin ? <Chip tone="accent">firm admin</Chip> : null}
             {isPanelist && <Chip tone="info">panelist</Chip>}
             {isConnected && !isAdmin && !isPanelist && <Chip>a visitor — read only</Chip>}
             {isConnected && counts.attention > 0 && <Chip tone="warn">{counts.attention} case{counts.attention === 1 ? " needs" : "s need"} you</Chip>}
             {IS_TESTNET && <span className="faint">· On this test network the deployer runs both demo firms.</span>}
           </div>
+          {!isConnected && (
+            <div className="row-between" style={{ marginTop: 14, gap: 16, flexWrap: "wrap" }}>
+              <span className="small muted">
+                Cases, panels, evidence and rulings are public — read them without a wallet. Connect one only to act as
+                a firm admin or panelist.
+              </span>
+              <ConnectButton label="Connect wallet" />
+            </div>
+          )}
         </Card>
 
         {desk.error && (
@@ -145,9 +154,7 @@ export default function Arbitrate() {
           </Notice>
         )}
 
-        {!isConnected ? (
-          <ConnectPrompt what="use the arbitration desk" />
-        ) : firm ? (
+        {firm ? (
           <div className="split split-trades">
             <div className="stack sticky">
               <FirmCard firm={firm} isAdmin={isAdmin} isPendingAdmin={isPendingAdmin} onChanged={() => void desk.refetch()} />

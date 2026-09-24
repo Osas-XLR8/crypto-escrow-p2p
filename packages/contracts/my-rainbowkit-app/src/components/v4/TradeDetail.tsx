@@ -19,6 +19,7 @@ import {
   sealEvidenceKey,
 } from "@escrowx/sdk";
 import { useEscrowX } from "@/context/EscrowX";
+import { useFirmPanels } from "@/hooks/useFirmPanels";
 import { V4, arbitratorName } from "@/config/v4";
 import { StateBadge } from "@/components/StateBadge";
 import { Addr, Button, Card, Field, KV, Notice, TxLink, errorText } from "@/components/ui";
@@ -39,6 +40,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   onChanged: () => void;
 }) {
   const { address, client, book, identity } = useEscrowX();
+  const { status: panelStatus } = useFirmPanels();
   const messages = useMessages();
   const publicClient = usePublicClient();
   const id = summary.tradeId;
@@ -126,6 +128,8 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   }
 
   const { trade: t, dispute: d, primaryFee, fallbackFee, claimable, assignee, panelistKey } = chain.data;
+  const fallbackPanel = panelStatus(t.fallbackArbitrator);
+  const activePanel = panelStatus(t.activeArbitrator !== zeroAddress ? t.activeArbitrator : t.arbitrator);
   const me = address?.toLowerCase();
   const isSeller = me === t.seller.toLowerCase();
   const isBuyer = me === t.buyer.toLowerCase();
@@ -163,10 +167,14 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
     }
   }
 
-  const actions: ReactNode[] = [];
+  // Ranked, not just collected: the lowest rank is what this trade is actually waiting on, and only that gets
+  // to be "your next step". Everything else — early releases, conceding, walking away — hides behind
+  // "Other options", so no screen ever proposes giving up as the thing to do next.
+  const actions: Act[] = [];
+  const act = (rank: number, mine: boolean, node: ReactNode) => actions.push({ rank, mine, node });
 
   if (isBuyer && t.state === TradeState.LOCKED && now <= paymentDeadline) {
-    actions.push(
+    act(Rank.NOW, true,
       <ActionBox key="paid" title={fiat ? `Send ${fiat} to the seller, then confirm here` : "Pay the seller, then confirm here"} note={`Due ${countdown(paymentDeadline)}. The seller's details are in the private chat below.`}>
         <Field label="Transfer reference" hint="optional · sent privately to the seller"
           help={identity ? "Helps the seller find your payment in their banking app." : "Unlock messaging below to send the seller a reference with it."}>
@@ -186,7 +194,9 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   }
 
   if (isSeller && open) {
-    actions.push(
+    // Releasing is the seller's job once the buyer says they've paid. Before that — and during a dispute,
+    // where it concedes the case — it's a choice, not a next step.
+    act(t.state === TradeState.PAID ? Rank.NOW : disputed ? Rank.GIVE_UP : Rank.EARLY, true,
       <ActionBox key="release"
         title={disputed ? "Release now (concedes the dispute)" : t.state === TradeState.PAID ? "Buyer says they've paid — check, then release" : "Release to the buyer"}
         note={t.state === TradeState.LOCKED ? "The buyer hasn't marked this as paid yet. Only release once the money is in your account." : undefined}>
@@ -204,7 +214,9 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   }
 
   if (t.state === TradeState.PAID && (isSeller || (isBuyer && now > releaseDeadline))) {
-    actions.push(
+    // For a buyer whose seller has gone quiet past the deadline this is the way forward; for the seller it's
+    // the escape hatch behind "check your bank first".
+    act(isBuyer ? Rank.NOW : Rank.FALLBACK, true,
       <ActionBox key="dispute" title={isSeller ? "Money didn't arrive? Open a dispute" : "Seller hasn't released — open a dispute"}>
         <p className="small muted">
           You deposit the arbitration fee (<span className="mono">{formatEther(primaryFee)} ETH</span>). The other side must match it or loses by default.
@@ -221,7 +233,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
 
   if (t.state === TradeState.FEE_PENDING) {
     if (isParty && !openerIsMe && now <= feeDeadline) {
-      actions.push(
+      act(Rank.NOW, true,
         <ActionBox key="fee" title="A dispute was opened against you">
           <p className="small muted">
             Match the <span className="mono">{formatEther(primaryFee)} ETH</span> arbitration fee {countdown(feeDeadline)}, or the other side wins by default. If you win, it&apos;s refunded.
@@ -235,7 +247,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
       );
     }
     if (now > feeDeadline) {
-      actions.push(
+      act(Rank.NOW, openerIsMe, 
         <ActionBox key="feeTimeout" title="Fee deadline passed">
           <p className="small muted">The other side didn&apos;t match the fee in time. Anyone can now settle it in the opener&apos;s favour.</p>
           <div>
@@ -249,9 +261,16 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   }
 
   if (t.state === TradeState.DISPUTED && isParty && !d.escalated && now > escalateAt) {
-    actions.push(
+    act(Rank.DEADLINE, true,
       <ActionBox key="escalate" title="Arbitrator missed its deadline">
         <p className="small muted">Move the case to <strong>{arbitratorName(t.fallbackArbitrator)}</strong> (fee <span className="mono">{formatEther(fallbackFee)} ETH</span>, paid from the held fees where possible).</p>
+        {!fallbackPanel.staffed && (
+          <Notice tone="warn">
+            {arbitratorName(t.fallbackArbitrator)} has no panelists registered right now, so it can&apos;t assign your case
+            to anyone. Escalating there would leave the escrow&apos;s timeout as the only way out — waiting for the
+            current firm is usually better.
+          </Notice>
+        )}
         <div>
           <Button variant="warn" busy={busy === "escalate"} disabled={!!busy} onClick={() => run("escalate", () => client.escalateToFallback(id), "Escalated to the fallback arbitrator.")}>
             Escalate
@@ -262,7 +281,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   }
 
   if (t.state === TradeState.DISPUTED && now > terminalAt) {
-    actions.push(
+    act(Rank.DEADLINE, isParty,
       <ActionBox key="terminal" title="Arbitration timed out">
         <p className="small muted">Nobody ruled in time. Closing returns the crypto to the seller&apos;s vault and splits the held fees.</p>
         <div>
@@ -275,7 +294,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   }
 
   if (t.state === TradeState.LOCKED && now > paymentDeadline) {
-    actions.push(
+    act(Rank.DEADLINE, isParty,
       <ActionBox key="unpaid" title="Payment window missed" note={`The buyer didn't mark this as paid in time. Anyone can now return the ${SYM} to the seller's vault.`}>
         <div>
           <Button variant="primary" busy={busy === "unpaid"} disabled={!!busy} onClick={() => run("unpaid", () => client.cancelUnpaid(id), "Trade cancelled; crypto is back in the seller's vault.")}>
@@ -287,7 +306,8 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   }
 
   if (isBuyer && open) {
-    actions.push(
+    // Never the headline: before paying it's just an option, and after paying it hands the seller the money.
+    act(t.state === TradeState.LOCKED ? Rank.EARLY : Rank.GIVE_UP, true,
       <ActionBox key="cancel" title={disputed ? "Withdraw from the trade (concedes the dispute)" : "Changed your mind?"}>
         <p className="small muted">Cancelling returns the crypto to the seller. <strong>Don&apos;t cancel if you already paid</strong> — open a dispute instead.</p>
         <div>
@@ -298,6 +318,22 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
       </ActionBox>
     );
   }
+
+  const ranked = [...actions].sort((a, b) => a.rank - b.rank);
+  // Onlookers can only ever take the time-based actions, so for them the list is just a list.
+  const primary = isParty ? ranked.find((a) => a.mine && a.rank <= Rank.FALLBACK) : ranked[0];
+  const others = ranked.filter((a) => a !== primary);
+
+  const waitingFor =
+    t.state === TradeState.LOCKED ? (isSeller ? "Waiting for the buyer to send the money and mark this as paid." : null)
+    : t.state === TradeState.PAID ? (isBuyer ? `Waiting for the seller to check their bank and release. If they don't, you can open a dispute ${countdown(releaseDeadline)}.` : null)
+    : t.state === TradeState.FEE_PENDING ? (openerIsMe
+        ? `Waiting for the other party to match the arbitration fee — due ${countdown(feeDeadline)}. If they don't, you can settle by default.`
+        : "Waiting for the arbitration fee window.")
+    : t.state === TradeState.DISPUTED ? (assignee === zeroAddress
+        ? `${arbitratorName(t.activeArbitrator !== zeroAddress ? t.activeArbitrator : t.arbitrator)} is assigning a panelist. Add your evidence below while you wait.`
+        : "A panelist has the case. Add your evidence below — that's what they rule on.")
+    : null;
 
   // The deadline that matters right now, shown in the header.
   const deadline =
@@ -315,7 +351,14 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   const kvRows: [ReactNode, ReactNode][] = [
     ["Seller", <Addr key="s" address={t.seller} you={isSeller} />],
     ["Buyer", <Addr key="b" address={t.buyer} you={isBuyer} />],
-    ["Arbitrator", `${arbitratorName(t.activeArbitrator !== zeroAddress ? t.activeArbitrator : t.arbitrator)}${d.escalated ? " (fallback)" : ""}`],
+    [
+      "Arbitrator",
+      <span key="a">
+        {arbitratorName(t.activeArbitrator !== zeroAddress ? t.activeArbitrator : t.arbitrator)}
+        {d.escalated ? " (fallback)" : ""}
+        {activePanel.size !== undefined && <span className="faint"> · {activePanel.size} panelist{activePanel.size === 1 ? "" : "s"}</span>}
+      </span>,
+    ],
   ];
   if (t.state === TradeState.DISPUTED) kvRows.push(["Assigned panelist", assignee === zeroAddress ? "Not assigned yet" : shortAddr(assignee)]);
   if (deadline) kvRows.push([deadline.label, <span key="d" className="mono">{fmtTs(deadline.at)}</span>]);
@@ -354,16 +397,20 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
             </Notice>
           )}
 
-          {actions.length > 0 && (
+          {primary && (
             <div className="stack-sm">
               <span className="eyebrow">{isParty ? "Your next step" : "Available actions"}</span>
-              {actions}
+              {primary.node}
             </div>
           )}
-          {actions.length === 0 && open && isParty && (
-            <Notice tone="info">
-              {t.state === TradeState.LOCKED ? "Waiting for the buyer to pay and confirm." : t.state === TradeState.PAID ? "Waiting for the seller to check their bank and release." : "With the arbitrator. Nothing to do right now."}
-            </Notice>
+          {!primary && open && isParty && waitingFor && <Notice tone="info">{waitingFor}</Notice>}
+          {others.length > 0 && (
+            <details className="stack-sm">
+              <summary className="small faint" style={{ cursor: "pointer" }}>
+                {primary ? `Other options (${others.length})` : `Things you can still do (${others.length})`}
+              </summary>
+              <div className="stack-sm" style={{ marginTop: 10 }}>{others.map((a, i) => <div key={i}>{a.node}</div>)}</div>
+            </details>
           )}
           {message && <Notice tone={message.tone}>{message.text}</Notice>}
 
@@ -388,6 +435,22 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   );
 }
 
+interface Act {
+  rank: number;
+  /** The connected wallet is the one expected to do this. */
+  mine: boolean;
+  node: ReactNode;
+}
+
+/** Lower is more urgent. Only NOW…FALLBACK can be "your next step". */
+const Rank = {
+  NOW: 10,        // what the protocol is waiting on you for
+  DEADLINE: 20,   // a window has expired and someone must close it out
+  FALLBACK: 40,   // legitimate, but only after the normal path stalls
+  EARLY: 60,      // allowed, out of turn
+  GIVE_UP: 90,    // hands the money to the other side
+} as const;
+
 function ActionBox({ title, note, children }: { title: string; note?: string; children: ReactNode }) {
   return (
     <div className="action">
@@ -402,7 +465,7 @@ function ActionBox({ title, note, children }: { title: string; note?: string; ch
 
 // ─── Progress ─────────────────────────────────────────────────────────────────
 
-type StepStatus = "done" | "current" | "todo" | "bad";
+type StepStatus = "done" | "current" | "todo" | "bad" | "skipped";
 
 function Progress({ state, summary }: { state: number; summary: TradeSummary }) {
   const wentToDispute = summary.events.some((e) => e.name === "DisputeRequested");
@@ -410,21 +473,23 @@ function Progress({ state, summary }: { state: number; summary: TradeSummary }) 
   let steps: { label: string; status: StepStatus }[];
   if (state === TradeState.CANCELLED) {
     steps = [{ label: "Locked", status: "done" }];
-    if (paid) steps.push({ label: "Paid", status: "done" });
+    steps.push({ label: "Paid", status: paid ? "done" : "skipped" });
     if (wentToDispute) steps.push({ label: "Dispute", status: "done" });
     steps.push({ label: "Returned", status: "bad" });
   } else if (wentToDispute || state === TradeState.FEE_PENDING || state === TradeState.DISPUTED) {
     const resolved = state === TradeState.RELEASED;
     steps = [
       { label: "Locked", status: "done" },
-      { label: "Paid", status: "done" },
+      { label: "Paid", status: paid ? "done" : "skipped" },
       { label: "Dispute", status: resolved ? "done" : "current" },
       { label: "Resolved", status: resolved ? "done" : "todo" },
     ];
   } else {
     steps = [
       { label: "Locked", status: state === TradeState.LOCKED ? "current" : "done" },
-      { label: "Paid", status: state === TradeState.PAID ? "current" : state === TradeState.RELEASED ? "done" : "todo" },
+      // A seller can release straight from LOCKED; claiming the buyer confirmed payment they never confirmed
+      // would be a lie about the record, so that stage is greyed out as skipped instead.
+      { label: "Paid", status: state === TradeState.PAID ? "current" : paid ? "done" : state === TradeState.RELEASED ? "skipped" : "todo" },
       { label: "Released", status: state === TradeState.RELEASED ? "done" : "todo" },
     ];
   }
