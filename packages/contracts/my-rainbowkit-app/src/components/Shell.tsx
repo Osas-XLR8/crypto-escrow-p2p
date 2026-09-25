@@ -75,6 +75,7 @@ export function Shell({ nav, onBrand, children }: { nav?: ReactNode; onBrand?: (
             ) : (
               <code title={V4.escrow}>{V4.escrow.slice(0, 10)}…</code>
             )}
+            <a href="https://github.com/Osas-XLR8/crypto-escrow-p2p/blob/main/docs/case-records.md" target="_blank" rel="noreferrer" className="mono" title="Every dispute path run end to end on this network, with the transactions">case records ↗</a>
             <a href="https://github.com/Osas-XLR8/crypto-escrow-p2p" target="_blank" rel="noreferrer" className="mono">source ↗</a>
           </span>
         </div>
