@@ -20,7 +20,7 @@ case to different people, not just a different contract.
 
 ---
 
-## Case 1 — a ruling, start to finish (trade #1)
+## Trade #1 — a ruling, start to finish (case #1)
 
 The plain path: a buyer says they paid, the seller says they didn't see it, a panelist reads the evidence and
 rules. Opened and settled in **44 seconds**.
@@ -30,7 +30,7 @@ buyer and the buyer's arbitration fee refunded; the seller's fee paid the firm.
 
 ---
 
-## Case 2 — a **contested** case: both sides filed evidence (trade #2)
+## Trade #2 — a **contested** case: both sides filed evidence (case #2)
 
 The case worth showing. Both parties submitted sealed evidence and the panelist had two accounts of the same
 trade to weigh — the buyer's receipt against the seller's bank statement. **60 seconds**, eleven transactions.
@@ -61,7 +61,7 @@ Reproduce it: `npm run demo:dispute -- --contested` (from `packages/sdk`).
 
 ---
 
-## Case 3 — fee forfeit: the other side never paid (trade #3) · *window closes 26 Sep 2026, 06:54 UTC*
+## Trade #3 — fee forfeit: the other side never paid · *window closes 26 Sep 2026, 06:54 UTC*
 
 A dispute where the counterparty simply doesn't match the arbitration fee. After the escrow's fee window
 (24 hours — the contract's own minimum, unshortenable), anyone can settle it in the opener's favour.
@@ -80,7 +80,7 @@ the side that walked away lost by default.
 
 ---
 
-## Case 4 — escalation: the firm went quiet (trade #4) · *window closes 2 Oct 2026*
+## Trade #4 — escalation: the firm went quiet (case #3) · *window closes 2 Oct 2026*
 
 A dispute the first firm never rules on. After the escrow's arbitration timeout (7 days — again the contract
 minimum), either party can move the case to the fallback firm, which has its own panel.
@@ -99,10 +99,10 @@ settles — four transactions, no involvement from the firm that went quiet.
 
 ## Also on this deployment
 
-| Case | Trade | What it shows |
+| Trade | Case | What it shows |
 |---|---|---|
-| #6 | #44 | A contested dispute against a market maker — the same path as case 2, but the loser is a maker with offers on the book, so the loss shows on its reputation badge. |
-| #4 | #41 | **A panelist declining to rule.** The case was opened by a run that crashed before either party filed anything; with no evidence to weigh, the panelist ruled "refuse", and the escrow returned the crypto to the seller. The ruling a firm should make when it has nothing to go on is also a ruling. |
+| #44 | #6 | A contested dispute against a market maker — the same path as case 2, but the loser is a maker with offers on the book, so the loss shows on its reputation badge. |
+| #41 | #4 | **A panelist declining to rule.** The case was opened by a run that crashed before either party filed anything; with no evidence to weigh, the panelist ruled "refuse", and the escrow returned the crypto to the seller. The ruling a firm should make when it has nothing to go on is also a ruling. |
 
 ---
 
