@@ -21,6 +21,9 @@ A minimal, investor-safe P2P escrow demo:
 - **Arbitration case records** ([docs/case-records.md](docs/case-records.md)): every dispute path run end to end
   on Base Sepolia, with the transactions — including a contested case where both sides filed sealed evidence.
 
+> **Scope is frozen** as of 25 Sep 2026 ([docs/scope-freeze.md](docs/scope-freeze.md)): this build is what goes
+> to audit. Defects and the audit's own findings still get fixed; features don't get added.
+
 ## Quick Demo (Local)
 ### 1) Start local chain
 ```bash
