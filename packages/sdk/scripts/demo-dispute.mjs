@@ -1,0 +1,298 @@
+#!/usr/bin/env node
+// Runs one complete dispute, start to finish, with real transactions:
+//
+//   offer → trade → payment marked → dispute opened → fee matched → panelist assigned →
+//   encrypted evidence from the buyer → ruling proposed → firm review → ruling executed → payout checked
+//
+// It exists because the arbitration machinery is the part of this product nobody ever sees: watching it
+// happen end to end takes days of waiting on a live network, or a script like this one.
+//
+//   node scripts/demo-dispute.mjs --chain 31337 --warp     # local Anvil, time warped past the review period
+//   PRIVATE_KEY=0x… node scripts/demo-dispute.mjs          # Base Sepolia, waits out the real review period
+//   … --stop-at fee-pending                                # park a trade in one state to look at the UI
+//   … --opener buyer --warp                                # the buyer opens the dispute (needs the release
+//                                                            window to pass, so local chains only)
+//
+// Test networks only — it refuses to run on a mainnet. Every wallet it uses is derived from the deployer
+// key, so re-runs reuse the same demo parties instead of littering the chain with new ones.
+
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createPublicClient, createWalletClient, erc20Abi, formatEther, http, keccak256, parseEther, parseUnits, toBytes, zeroHash } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { anvil, arbitrumSepolia, baseSepolia, optimismSepolia, sepolia } from "viem/chains";
+import {
+  EscrowV4Client,
+  adapterKeyFromNostrPubkey,
+  createOffer,
+  decryptEvidence,
+  deriveNostrIdentity,
+  encryptEvidence,
+  escrowCoreV4Abi,
+  formatEvidenceUri,
+  keyToHex,
+  licensedArbitratorAdapterAbi,
+  openEvidenceKey,
+  parseEvidenceUri,
+  sealEvidenceKey,
+  signOffer,
+} from "../dist/index.js";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const contracts = join(here, "../../contracts");
+const arg = (name, fallback) => {
+  const i = process.argv.indexOf(`--${name}`);
+  return i > 0 ? process.argv[i + 1] : fallback;
+};
+const flag = (name) => process.argv.includes(`--${name}`);
+
+const CHAIN_ID = Number(arg("chain", "84532"));
+const CHAINS = { 31337: anvil, 84532: baseSepolia, 11155111: sepolia, 421614: arbitrumSepolia, 11155420: optimismSepolia };
+const chain = CHAINS[CHAIN_ID];
+if (!chain) throw new Error(`Unsupported or non-test chain ${CHAIN_ID}`);
+const LOCAL = CHAIN_ID === 31337;
+const WARP = flag("warp");
+const STOP_AT = arg("stop-at", "done");
+const OPENER = arg("opener", "seller");
+const STAGES = ["locked", "paid", "fee-pending", "disputed", "assigned", "evidence", "proposed", "done"];
+if (!STAGES.includes(STOP_AT)) throw new Error(`--stop-at must be one of: ${STAGES.join(", ")}`);
+if (!["seller", "buyer"].includes(OPENER)) throw new Error("--opener must be seller or buyer");
+/** Stops the run once the trade is parked in the state you asked for. */
+function stopHere(stage) {
+  if (STOP_AT !== stage) return false;
+  console.log(`
+Stopped at "${stage}" as asked — the trade is sitting in that state for you to look at.`);
+  process.exit(0);
+}
+async function warpPast(seconds, why) {
+  if (!WARP) throw new Error(`${why} needs ${seconds}s to pass; re-run with --warp on a local chain`);
+  for (const [method, params] of [["evm_increaseTime", [seconds]], ["evm_mine", []]]) {
+    await fetch(RPC, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+  }
+}
+if (WARP && !LOCAL) throw new Error("--warp only works on a local chain you control");
+
+const deploymentPath = arg("deployment", [join(contracts, `deployments/v4-${CHAIN_ID}.json`), join(contracts, `.deployments/v4-${CHAIN_ID}.json`)].find(existsSync));
+if (!deploymentPath) throw new Error(`No deployment file for chain ${CHAIN_ID}. Deploy first.`);
+const d = JSON.parse(readFileSync(deploymentPath, "utf8"));
+
+function deployerKey() {
+  if (process.env.PRIVATE_KEY) return process.env.PRIVATE_KEY;
+  if (LOCAL) return "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"; // Anvil #0
+  const env = join(contracts, ".env.testnet");
+  const line = existsSync(env) && readFileSync(env, "utf8").split(/\r?\n/).find((l) => l.startsWith("PRIVATE_KEY="));
+  if (!line) throw new Error("Set PRIVATE_KEY or create packages/contracts/.env.testnet (./testnet-wallet.sh)");
+  return line.slice("PRIVATE_KEY=".length).trim();
+}
+
+const RPC = arg("rpc", process.env.RPC_URL || (CHAIN_ID === 84532 ? "https://base-sepolia-rpc.publicnode.com" : chain.rpcUrls.default.http[0]));
+const AMOUNT = parseUnits(arg("amount", "20"), 6);
+const GAS_TOPUP = parseEther(LOCAL ? "1" : "0.0008");
+const GAS_MIN = parseEther(LOCAL ? "0.2" : "0.0004");
+const units = (n) => Number(n) / 1e6;
+
+const publicClient = createPublicClient({ chain, transport: http(RPC) });
+if ((await publicClient.getChainId()) !== CHAIN_ID) throw new Error(`RPC is not on chain ${CHAIN_ID}`);
+
+const key = deployerKey();
+const deployer = privateKeyToAccount(key);
+const deployerWallet = createWalletClient({ account: deployer, chain, transport: http(RPC) });
+const derived = (label) => privateKeyToAccount(keccak256(toBytes(`${key}:escrowx-demo-${label}`)));
+const walletFor = (account) => createWalletClient({ account, chain, transport: http(RPC) });
+
+const started = Date.now();
+const elapsed = () => `${((Date.now() - started) / 1000).toFixed(0)}s`;
+const step = (n, text) => console.log(`[${elapsed().padStart(4)}] ${n}. ${text}`);
+
+async function send(hashPromise) {
+  const hash = await hashPromise;
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  if (receipt.status !== "success") throw new Error(`transaction ${hash} reverted`);
+  return receipt;
+}
+
+async function topUp(account, label) {
+  const balance = await publicClient.getBalance({ address: account.address });
+  if (balance < GAS_MIN) await send(deployerWallet.sendTransaction({ to: account.address, value: GAS_TOPUP }));
+  console.log(`         ${label}: ${account.address}`);
+}
+
+// ─── Cast ─────────────────────────────────────────────────────────────────────
+
+const seller = derived("dispute-seller");
+const buyer = derived("dispute-buyer");
+const panelist = derived("panelist");
+const sellerClient = new EscrowV4Client(publicClient, d.escrow, walletFor(seller));
+const buyerClient = new EscrowV4Client(publicClient, d.escrow, walletFor(buyer));
+const firm = d.primaryArbitrator;
+
+console.log(`Chain ${CHAIN_ID} · escrow ${d.escrow} · firm ${firm}`);
+await topUp(seller, "seller  ");
+await topUp(buyer, "buyer   ");
+await topUp(panelist, "panelist");
+
+const firmAdmin = await publicClient.readContract({ address: firm, abi: licensedArbitratorAdapterAbi, functionName: "firmAdmin" });
+if (firmAdmin.toLowerCase() !== deployer.address.toLowerCase()) throw new Error(`This key doesn't run firm ${firm} (admin is ${firmAdmin})`);
+const reviewPeriod = Number(await publicClient.readContract({ address: firm, abi: licensedArbitratorAdapterAbi, functionName: "REVIEW_PERIOD" }));
+
+// The panelist publishes an encryption key so parties can seal evidence to them; the firm registers it.
+const panelistIdentity = await deriveNostrIdentity(walletFor(panelist), panelist.address);
+const panelistKey = adapterKeyFromNostrPubkey(panelistIdentity.publicKey);
+const registered = await publicClient.readContract({ address: firm, abi: licensedArbitratorAdapterAbi, functionName: "isPanelist", args: [panelist.address] });
+if (!registered) {
+  await send(deployerWallet.writeContract({ address: firm, abi: licensedArbitratorAdapterAbi, functionName: "setPanelist", args: [panelist.address, true, panelistKey] }));
+  console.log(`         registered the demo panelist on the firm`);
+}
+
+// ─── 1. A seller with crypto in the vault, and a signed offer ─────────────────
+
+const mintAbi = [{ type: "function", name: "mint", stateMutability: "nonpayable", inputs: [{ name: "to", type: "address" }, { name: "amount", type: "uint256" }], outputs: [] }];
+const free = await sellerClient.freeBalance(seller.address, d.usdt);
+if (free < AMOUNT) {
+  const held = await publicClient.readContract({ address: d.usdt, abi: erc20Abi, functionName: "balanceOf", args: [seller.address] });
+  if (held < AMOUNT - free) {
+    await send(deployerWallet.writeContract({ address: d.usdt, abi: mintAbi, functionName: "mint", args: [seller.address, AMOUNT - free - held] }));
+    for (let i = 0; i < 20; i++) {
+      const now = await publicClient.readContract({ address: d.usdt, abi: erc20Abi, functionName: "balanceOf", args: [seller.address] });
+      if (now >= AMOUNT - free) break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  await sellerClient.deposit(d.usdt, AMOUNT - free);
+}
+step(1, `seller has ${units(AMOUNT)} tUSDT in the vault and signs an offer`);
+
+const offer = createOffer({
+  seller: seller.address,
+  token: d.usdt,
+  minAmount: AMOUNT,
+  maxAmount: AMOUNT,
+  totalAmount: AMOUNT,
+  paymentWindow: 600n, // the contract's own minimum
+  releaseWindow: 1800n,
+  arbitrator: firm,
+  fallbackArbitrator: d.fallbackArbitrator,
+  terms: {
+    chainId: CHAIN_ID,
+    escrow: d.escrow,
+    tokenSymbol: "tUSDT",
+    tokenDecimals: 6,
+    fiatCurrency: "NGN",
+    price: "1600",
+    paymentMethods: ["Bank transfer"],
+    conditions: "Demo trade: this one is scripted to end in a dispute.",
+  },
+  nonce: await sellerClient.makerNonce(seller.address),
+  // The chain's clock, not this machine's: a local chain that has been time-warped is often hours ahead.
+  expiry: (await publicClient.getBlock({ blockTag: "latest" })).timestamp + 3600n,
+});
+const signature = await signOffer(walletFor(seller), offer, CHAIN_ID, d.escrow);
+
+// ─── 2. The trade ─────────────────────────────────────────────────────────────
+
+const tradeId = await buyerClient.takeOffer(offer, signature, AMOUNT);
+step(2, `buyer takes it — trade #${tradeId}, ${units(AMOUNT)} tUSDT locked in escrow`);
+stopHere("locked");
+
+// The buyer encrypts a receipt; only its fingerprint goes on-chain with the payment.
+const receipt = new TextEncoder().encode(`Demo transfer receipt for trade ${tradeId} — bank ref DEMO-${tradeId}-${Date.now()}`);
+const evidence = await encryptEvidence(receipt);
+await buyerClient.markPaid(tradeId, evidence.commitment);
+step(3, `buyer marks the fiat as sent, with an encrypted receipt fingerprint on-chain`);
+stopHere("paid");
+
+// ─── 3. The dispute ───────────────────────────────────────────────────────────
+
+const fee = formatEther(await sellerClient.arbitrationCost(firm));
+if (OPENER === "seller") {
+  await sellerClient.openDispute(tradeId);
+  step(4, `seller says the money never arrived and opens a dispute (fee ${fee} ETH)`);
+} else {
+  // The contract only lets a buyer dispute once the seller's release window has run out.
+  const trade = await buyerClient.getTrade(tradeId);
+  const now = Number((await publicClient.getBlock({ blockTag: "latest" })).timestamp);
+  if (now <= Number(trade.releaseDeadline)) await warpPast(Number(trade.releaseDeadline) - now + 1, "a buyer-opened dispute");
+  await buyerClient.openDispute(tradeId);
+  step(4, `seller never released, so the buyer opens the dispute (fee ${fee} ETH)`);
+}
+stopHere("fee-pending");
+
+const matcher = OPENER === "seller" ? buyerClient : sellerClient;
+const disputeId = await matcher.payArbitrationFee(tradeId);
+step(5, `${OPENER === "seller" ? "buyer" : "seller"} matches the fee — case #${disputeId} is now with the firm`);
+stopHere("disputed");
+
+await send(deployerWallet.writeContract({ address: firm, abi: licensedArbitratorAdapterAbi, functionName: "assign", args: [disputeId, panelist.address] }));
+step(6, `firm assigns the case to a panelist (not a party to the trade — the contract checks)`);
+stopHere("assigned");
+
+// ─── 4. Evidence, sealed to the assigned panelist only ────────────────────────
+
+const buyerIdentity = await deriveNostrIdentity(walletFor(buyer), buyer.address);
+const sealed = sealEvidenceKey(buyerIdentity, panelistIdentity.publicKey, {
+  tradeId: tradeId.toString(),
+  commitment: evidence.commitment,
+  key: keyToHex(evidence.key),
+  mimeType: "text/plain",
+});
+await buyerClient.submitEvidence(tradeId, formatEvidenceUri(buyerIdentity.publicKey, panelistIdentity.publicKey, sealed));
+step(7, `buyer submits the decryption key, sealed so only the assigned panelist can open it`);
+
+// The panelist does what the desk does: read the event, open the key, check the fingerprint matches.
+const evidenceLogs = await publicClient.getLogs({
+  address: d.escrow,
+  event: escrowCoreV4Abi.find((x) => x.type === "event" && x.name === "Evidence"),
+  args: { evidenceGroupID: tradeId },
+  fromBlock: BigInt(d.deployBlock ?? 0),
+  toBlock: "latest",
+});
+const parsed = parseEvidenceUri(evidenceLogs.at(-1).args.evidence);
+const opened = openEvidenceKey(panelistIdentity, parsed.senderPubkey, parsed.sealed);
+const plain = new TextDecoder().decode(await decryptEvidence(evidence.ciphertext, Buffer.from(opened.key.slice(2), "hex"), opened.commitment));
+step(8, `panelist opens it and checks it against the on-chain fingerprint: "${plain.slice(0, 48)}…"`);
+stopHere("evidence");
+
+// ─── 5. The ruling ────────────────────────────────────────────────────────────
+
+const RULING_BUYER = 1n;
+await send(walletFor(panelist).writeContract({
+  address: firm,
+  abi: licensedArbitratorAdapterAbi,
+  functionName: "proposeRuling",
+  args: [disputeId, RULING_BUYER, keccak256(toBytes("receipt matches the payment the buyer claimed"))],
+}));
+step(9, `panelist proposes: the buyer paid, so the crypto goes to the buyer`);
+stopHere("proposed");
+
+if (WARP) {
+  await warpPast(reviewPeriod + 1, "the review period");
+  step(10, `firm review period (${reviewPeriod / 60} min) — warped past it on this local chain`);
+} else {
+  const until = Math.floor(Date.now() / 1000) + reviewPeriod + 5;
+  step(10, `firm review period: ${reviewPeriod / 60} min in which the firm can veto its panelist. Waiting…`);
+  while (Math.floor(Date.now() / 1000) < until) {
+    await new Promise((r) => setTimeout(r, 15_000));
+    process.stdout.write(`         ${Math.max(0, until - Math.floor(Date.now() / 1000))}s left\r`);
+  }
+}
+
+await send(deployerWallet.writeContract({ address: firm, abi: licensedArbitratorAdapterAbi, functionName: "executeRuling", args: [disputeId] }));
+step(11, `nobody vetoed, so anyone can execute the ruling — and someone does`);
+
+// ─── 6. Did the money actually move? ──────────────────────────────────────────
+
+const trade = await buyerClient.getTrade(tradeId);
+const buyerBalance = await publicClient.readContract({ address: d.usdt, abi: erc20Abi, functionName: "balanceOf", args: [buyer.address] });
+const buyerVault = await buyerClient.freeBalance(buyer.address, d.usdt);
+const buyerRefund = await buyerClient.claimableNative(buyer.address);
+const sellerRefund = await sellerClient.claimableNative(seller.address);
+
+console.log(`\nTrade #${tradeId} state ${trade.state} (5 = RELEASED)`);
+console.log(`Buyer  ${units(buyerVault)} tUSDT in vault · ${units(buyerBalance)} in wallet · ${formatEther(buyerRefund)} ETH fee refund waiting`);
+console.log(`Seller ${formatEther(sellerRefund)} ETH refund (the loser's fee pays the firm)`);
+console.log(`\nComplete dispute in ${elapsed()}.`);
+if (trade.state !== 5) {
+  console.error("Expected the trade to be RELEASED to the buyer.");
+  process.exit(1);
+}
