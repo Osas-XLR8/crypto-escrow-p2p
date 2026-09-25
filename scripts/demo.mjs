@@ -199,9 +199,11 @@ for (const [port, wslPattern] of [
 await waitFor("ports to free up", async () => (await free(PORT)) && (await free(RELAY_PORT)));
 ok("ports are free");
 
+const DIST = ".next-demo";
+
 say("Clearing the build cache");
-rmSync(join(app, ".next"), { recursive: true, force: true });
-ok("removed .next (a stale chunk here is the classic 500 on first load)");
+rmSync(join(app, DIST), { recursive: true, force: true });
+ok(`removed ${DIST} (a stale chunk here is the classic 500 on first load)`);
 
 if (INSTALL) {
   say("Installing dependencies");
@@ -275,6 +277,8 @@ background("app", "npx", ["next", "dev", "-p", String(PORT)], {
   cwd: app,
   env: {
     ...process.env,
+    // Its own build directory, so a `next build` running elsewhere cannot pull chunks out from under it.
+    NEXT_DIST_DIR: DIST,
     NEXT_PUBLIC_CHAIN_ID: "31337",
     NEXT_PUBLIC_RPC_URL: CHAIN_RPC,
     NEXT_PUBLIC_V4_ESCROW: deployment.escrow,

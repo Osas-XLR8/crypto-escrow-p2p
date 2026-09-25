@@ -17,6 +17,10 @@ const nextConfig = {
   // Say where this app's root is instead of letting Next guess from the nearest lockfile: a stray
   // package-lock.json anywhere above the repo made it infer someone's home directory and warn on every boot.
   outputFileTracingRoot: __dirname,
+  // A production build and a running dev server share .next and overwrite each other's chunks, which is how a
+  // page that worked a minute ago starts serving a 500 for a chunk that no longer exists. The demo
+  // environment builds into its own directory so the two can never collide.
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   images: { unoptimized: true },
   basePath,
   webpack: (config) => {
