@@ -225,3 +225,48 @@ export function nextStep(t: TradeSummary, v: Viewer): NextStep {
       return { label: "Unknown", tone: "waiting", mine: false };
   }
 }
+
+// ─── Progress ─────────────────────────────────────────────────────────────────
+
+export type StepStatus = "done" | "current" | "todo" | "bad" | "skipped";
+
+export interface ProgressStep {
+  label: string;
+  status: StepStatus;
+}
+
+/**
+ * The stages of a trade, and what actually happened to each one. A stage that was never reached is "skipped",
+ * never "done": a seller can release straight from LOCKED, and showing PAID as completed would claim the buyer
+ * confirmed a payment they never confirmed.
+ */
+export function progressSteps(state: V4State, events: Pick<TradeEvent, "name">[]): ProgressStep[] {
+  const happened = (name: V4EventName) => events.some((e) => e.name === name);
+  const paid = happened("PaymentMarked");
+  const wentToDispute = happened("DisputeRequested");
+
+  if (state === V4State.CANCELLED) {
+    return [
+      { label: "Locked", status: "done" },
+      { label: "Paid", status: paid ? "done" : "skipped" },
+      ...(wentToDispute ? ([{ label: "Dispute", status: "done" }] as ProgressStep[]) : []),
+      { label: "Returned", status: "bad" },
+    ];
+  }
+
+  if (wentToDispute || state === V4State.FEE_PENDING || state === V4State.DISPUTED) {
+    const resolved = state === V4State.RELEASED;
+    return [
+      { label: "Locked", status: "done" },
+      { label: "Paid", status: paid ? "done" : "skipped" },
+      { label: "Dispute", status: resolved ? "done" : "current" },
+      { label: "Resolved", status: resolved ? "done" : "todo" },
+    ];
+  }
+
+  return [
+    { label: "Locked", status: state === V4State.LOCKED ? "current" : "done" },
+    { label: "Paid", status: state === V4State.PAID ? "current" : paid ? "done" : state === V4State.RELEASED ? "skipped" : "todo" },
+    { label: "Released", status: state === V4State.RELEASED ? "done" : "todo" },
+  ];
+}

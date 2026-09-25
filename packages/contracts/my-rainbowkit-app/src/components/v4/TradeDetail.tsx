@@ -32,7 +32,7 @@ import { fmtDuration, fmtTs, shortAddr, shortHash } from "@/lib/format";
 import { useMessages } from "@/context/Messages";
 import { describeEvent } from "@/lib/v4/describe";
 import { downloadBytes, findTradeOffer, fmtFiat, fmtToken, loadEvidence, recallTradeTerms, rememberTradeTerms, storeEvidence, termsFromOffer } from "@/lib/v4/local";
-import type { TradeSummary } from "@/lib/v4/tradeIndex";
+import { V4State, progressSteps, type TradeSummary } from "@/lib/v4/tradeIndex";
 
 const SYM = V4.tokenSymbol;
 
@@ -474,37 +474,10 @@ function ActionBox({ title, note, children }: { title: string; note?: string; ch
 
 // ─── Progress ─────────────────────────────────────────────────────────────────
 
-type StepStatus = "done" | "current" | "todo" | "bad" | "skipped";
-
 function Progress({ state, summary }: { state: number; summary: TradeSummary }) {
-  const wentToDispute = summary.events.some((e) => e.name === "DisputeRequested");
-  const paid = summary.events.some((e) => e.name === "PaymentMarked");
-  let steps: { label: string; status: StepStatus }[];
-  if (state === TradeState.CANCELLED) {
-    steps = [{ label: "Locked", status: "done" }];
-    steps.push({ label: "Paid", status: paid ? "done" : "skipped" });
-    if (wentToDispute) steps.push({ label: "Dispute", status: "done" });
-    steps.push({ label: "Returned", status: "bad" });
-  } else if (wentToDispute || state === TradeState.FEE_PENDING || state === TradeState.DISPUTED) {
-    const resolved = state === TradeState.RELEASED;
-    steps = [
-      { label: "Locked", status: "done" },
-      { label: "Paid", status: paid ? "done" : "skipped" },
-      { label: "Dispute", status: resolved ? "done" : "current" },
-      { label: "Resolved", status: resolved ? "done" : "todo" },
-    ];
-  } else {
-    steps = [
-      { label: "Locked", status: state === TradeState.LOCKED ? "current" : "done" },
-      // A seller can release straight from LOCKED; claiming the buyer confirmed payment they never confirmed
-      // would be a lie about the record, so that stage is greyed out as skipped instead.
-      { label: "Paid", status: state === TradeState.PAID ? "current" : paid ? "done" : state === TradeState.RELEASED ? "skipped" : "todo" },
-      { label: "Released", status: state === TradeState.RELEASED ? "done" : "todo" },
-    ];
-  }
   return (
     <div className="stepper" aria-label="Trade progress">
-      {steps.map((s) => (
+      {progressSteps(state as V4State, summary.events).map((s) => (
         <div key={s.label} className={`step ${s.status}`} aria-current={s.status === "current" ? "step" : undefined}>
           <div className="step-bar" />
           <span className="step-label">{s.label}</span>
