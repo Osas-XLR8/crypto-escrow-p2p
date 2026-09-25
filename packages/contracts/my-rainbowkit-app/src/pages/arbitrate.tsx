@@ -88,7 +88,10 @@ export default function Arbitrate() {
     open: cases.filter((c) => !c.executed).length,
     all: cases.length,
   };
-  const active: Filter = filter ?? (counts.attention > 0 ? "attention" : "open");
+  // Default to whatever this firm actually has: a desk whose only case is closed should open on it, not on an
+  // empty "Open" tab next to a case it is already showing.
+  const preferred: Filter = counts.attention > 0 ? "attention" : counts.open > 0 ? "open" : "all";
+  const active: Filter = filter ?? preferred;
   const visible = cases.filter((c) =>
     active === "attention" ? needsAttention(c) : active === "mine" ? same(c.assignee, address) : active === "open" ? !c.executed : true
   );
