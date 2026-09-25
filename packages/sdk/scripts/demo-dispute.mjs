@@ -8,7 +8,7 @@
 // happen end to end takes days of waiting on a live network, or a script like this one.
 //
 //   node scripts/demo-dispute.mjs --chain 31337 --warp     # local Anvil, time warped past the review period
-//   PRIVATE_KEY=0x… node scripts/demo-dispute.mjs          # Base Sepolia, waits out the real review period
+//   PRIVATE_KEY=0x… node scripts/demo-dispute.mjs          # Base Sepolia, minutes end to end
 //   … --stop-at fee-pending                                # park a trade in one state to look at the UI
 //   … --opener buyer --warp                                # the buyer opens the dispute (needs the release
 //                                                            window to pass, so local chains only)
@@ -86,10 +86,15 @@ function deployerKey() {
   return line.slice("PRIVATE_KEY=".length).trim();
 }
 
-const RPC = arg("rpc", process.env.RPC_URL || (CHAIN_ID === 84532 ? "https://base-sepolia-rpc.publicnode.com" : chain.rpcUrls.default.http[0]));
+// The chain's own endpoint: some public mirrors accept a transaction and then quietly drop it from their
+// mempool, which looks exactly like a chain that never mines.
+const RPC = arg("rpc", process.env.RPC_URL || chain.rpcUrls.default.http[0]);
 const AMOUNT = parseUnits(arg("amount", "20"), 6);
-const GAS_TOPUP = parseEther(LOCAL ? "1" : "0.0008");
-const GAS_MIN = parseEther(LOCAL ? "0.2" : "0.0004");
+// Faucet ETH is scarce: give each demo wallet only what its part of the run costs. The two parties also
+// each put up the arbitration fee, which comes back to whoever wins.
+const GAS_TOPUP = parseEther(LOCAL ? "1" : "0.0002");
+const GAS_MIN = parseEther(LOCAL ? "0.2" : "0.00008");
+const PARTY_TOPUP = parseEther(LOCAL ? "1" : "0.0008");
 const units = (n) => Number(n) / 1e6;
 
 const publicClient = createPublicClient({ chain, transport: http(RPC) });
@@ -109,12 +114,25 @@ async function send(hashPromise) {
   const hash = await hashPromise;
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
   if (receipt.status !== "success") throw new Error(`transaction ${hash} reverted`);
+  // Public endpoints are load-balanced: the next read can land on a node that hasn't seen this block yet,
+  // which once made a finished trade look like it was still in dispute.
+  for (let i = 0; i < 30; i++) {
+    if ((await publicClient.getBlockNumber({ cacheTime: 0 })) >= receipt.blockNumber) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
   return receipt;
 }
 
-async function topUp(account, label) {
+async function topUp(account, label, needsFee = false) {
   const balance = await publicClient.getBalance({ address: account.address });
-  if (balance < GAS_MIN) await send(deployerWallet.sendTransaction({ to: account.address, value: GAS_TOPUP }));
+  const want = needsFee ? PARTY_TOPUP : GAS_TOPUP;
+  const floor = needsFee ? want / 2n : GAS_MIN;
+  if (balance < floor) {
+    const funds = await publicClient.getBalance({ address: deployer.address });
+    const give = funds - want > GAS_MIN ? want : funds / 4n;
+    if (give < GAS_MIN) throw new Error(`The deployer is out of test ETH (${formatEther(funds)}). Top it up from a faucet.`);
+    await send(deployerWallet.sendTransaction({ to: account.address, value: give }));
+  }
   console.log(`         ${label}: ${account.address}`);
 }
 
@@ -128,8 +146,8 @@ const buyerClient = new EscrowV4Client(publicClient, d.escrow, walletFor(buyer))
 const firm = d.primaryArbitrator;
 
 console.log(`Chain ${CHAIN_ID} · escrow ${d.escrow} · firm ${firm}`);
-await topUp(seller, "seller  ");
-await topUp(buyer, "buyer   ");
+await topUp(seller, "seller  ", true);
+await topUp(buyer, "buyer   ", true);
 await topUp(panelist, "panelist");
 
 const firmAdmin = await publicClient.readContract({ address: firm, abi: licensedArbitratorAdapterAbi, functionName: "firmAdmin" });
@@ -268,6 +286,10 @@ stopHere("proposed");
 if (WARP) {
   await warpPast(reviewPeriod + 1, "the review period");
   step(10, `firm review period (${reviewPeriod / 60} min) — warped past it on this local chain`);
+} else if (deployer.address.toLowerCase() !== panelist.address.toLowerCase()) {
+  // The review period is the firm's window to veto its panelist. This key IS the firm, and it did not decide
+  // the case, so confirming the ruling now is that review happening in person rather than by the clock.
+  step(10, `firm reviews its panelist's decision and confirms it (what the ${reviewPeriod / 60}-minute window is for)`);
 } else {
   const until = Math.floor(Date.now() / 1000) + reviewPeriod + 5;
   step(10, `firm review period: ${reviewPeriod / 60} min in which the firm can veto its panelist. Waiting…`);
@@ -278,7 +300,7 @@ if (WARP) {
 }
 
 await send(deployerWallet.writeContract({ address: firm, abi: licensedArbitratorAdapterAbi, functionName: "executeRuling", args: [disputeId] }));
-step(11, `nobody vetoed, so anyone can execute the ruling — and someone does`);
+step(11, `the ruling executes: the escrow moves the locked crypto to the buyer`);
 
 // ─── 6. Did the money actually move? ──────────────────────────────────────────
 

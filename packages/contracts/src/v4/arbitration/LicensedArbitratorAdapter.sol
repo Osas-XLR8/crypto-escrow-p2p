@@ -21,7 +21,8 @@ import {IArbitrator, IArbitrable, IDisputeParties} from "../interfaces/IArbitrat
     • Conflict of interest: a panelist who is the buyer or seller of the disputed trade cannot be
       assigned (parties are read from the escrow via IDisputeParties).
     • Two-person rule: a panelist's ruling only executes after REVIEW_PERIOD, during which the firm
-      can veto it (every proposal and veto is an on-chain event, forming an audit trail).
+      can veto it (every proposal and veto is an on-chain event, forming an audit trail). The firm may
+      confirm a ruling before that period is up, but never one of its own — see executeRuling.
     • Evidence privacy: each panelist publishes an encryption public key; assignment emits it so the
       parties' clients can re-encrypt their evidence to the assigned panelist only.
     ─────────────────────────────────────────────────────────────────────────────
@@ -148,11 +149,16 @@ contract LicensedArbitratorAdapter is IArbitrator {
     }
 
     /// @notice Permissionless once the review period has passed without a veto.
+    /// @dev The firm can confirm a ruling sooner, but only one it did not write itself. The review period
+    /// exists to give the firm time to veto its panelist; the firm signing off in person is that review,
+    /// happening early. A panelist who also holds the admin key gets no shortcut — one key can never both
+    /// decide a case and finalise it without the full period elapsing.
     function executeRuling(uint256 disputeID) external {
         Case storage c = _existingCase(disputeID);
         require(!c.executed, "case closed");
         require(c.hasProposal, "no proposal");
-        require(block.timestamp >= uint256(c.proposedAt) + REVIEW_PERIOD, "review period active");
+        bool confirmedByFirm = msg.sender == firmAdmin && msg.sender != c.assignee;
+        require(confirmedByFirm || block.timestamp >= uint256(c.proposedAt) + REVIEW_PERIOD, "review period active");
 
         c.executed = true;
         emit RulingExecuted(disputeID, c.proposedRuling);

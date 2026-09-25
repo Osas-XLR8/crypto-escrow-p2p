@@ -219,6 +219,44 @@ contract LicensedArbitratorAdapterTest is V4TestBase {
         adapter.executeRuling(caseId);
     }
 
+    /// @dev The review period is the firm's window to veto its panelist; the firm confirming in person is
+    ///      that review happening early, so it may execute straight away.
+    function testFirmConfirmsItsPanelistsRulingWithoutWaiting() public {
+        (uint256 id, uint256 caseId) = _firmDispute(300 * U);
+        vm.prank(firmAdmin);
+        adapter.assign(caseId, panelist1);
+        vm.prank(panelist1);
+        adapter.proposeRuling(caseId, 1, keccak256("decision"));
+
+        vm.prank(stranger);
+        vm.expectRevert("review period active");
+        adapter.executeRuling(caseId);
+
+        vm.prank(firmAdmin);
+        adapter.executeRuling(caseId);
+
+        assertEq(uint256(_state(id)), uint256(EscrowCoreV4.State.RELEASED));
+        assertEq(usdt.balanceOf(buyer), 300 * U);
+    }
+
+    /// @dev …but a panelist holding the admin key is one person, not two, so they wait like everyone else.
+    function testFirmAdminActingAsItsOwnPanelistStillWaits() public {
+        vm.prank(firmAdmin);
+        adapter.setPanelist(firmAdmin, true, KEY1);
+
+        (, uint256 caseId) = _firmDispute(300 * U);
+        vm.startPrank(firmAdmin);
+        adapter.assign(caseId, firmAdmin);
+        adapter.proposeRuling(caseId, 1, keccak256("decision"));
+
+        vm.expectRevert("review period active");
+        adapter.executeRuling(caseId);
+
+        vm.warp(block.timestamp + REVIEW);
+        adapter.executeRuling(caseId);
+        vm.stopPrank();
+    }
+
     function testFirmVetoThenReassignedPanelistDecides() public {
         (uint256 id, uint256 caseId) = _firmDispute(300 * U);
         vm.prank(firmAdmin);
