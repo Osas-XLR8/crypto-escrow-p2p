@@ -11,6 +11,7 @@
 //   PRIVATE_KEY=0x… node scripts/demo-dispute.mjs          # Base Sepolia, minutes end to end
 //   … --stop-at fee-pending                                # park a trade in one state to look at the UI
 //   … --contested                                          # both sides file evidence, not just the buyer
+//   … --seller seller-3 --buyer buyer-3                     # run it between named demo wallets
 //   … --opener buyer --warp                                # the buyer opens the dispute (needs the release
 //                                                            window to pass, so local chains only)
 //
@@ -148,8 +149,10 @@ async function topUp(account, label, needsFee = false) {
 
 // ─── Cast ─────────────────────────────────────────────────────────────────────
 
-const seller = derived("dispute-seller");
-const buyer = derived("dispute-buyer");
+// The parties default to wallets kept for disputes, but can be any demo wallet — running a dispute against a
+// market maker is how that maker ends up with a dispute on its record, which is the whole point of showing one.
+const seller = derived(arg("seller", "dispute-seller"));
+const buyer = derived(arg("buyer", "dispute-buyer"));
 const panelist = derived("panelist");
 const sellerClient = new EscrowV4Client(publicClient, d.escrow, walletFor(seller));
 const buyerClient = new EscrowV4Client(publicClient, d.escrow, walletFor(buyer));
