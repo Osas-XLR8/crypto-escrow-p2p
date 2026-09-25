@@ -10,6 +10,7 @@ import {
   nostrPubkeyFromAdapterKey,
   openEvidenceKey,
   sealEvidenceKey,
+  TradeChat,
   unwrapTradeMessage,
   verifyHello,
   wrapTradeMessage,
@@ -119,5 +120,43 @@ describe("encrypted evidence", () => {
     expect(onchain).toMatch(/^0x[0-9a-f]{64}$/);
     expect(nostrPubkeyFromAdapterKey(onchain)).toBe(arbitrator.identity.publicKey);
     expect(() => nostrPubkeyFromAdapterKey("0x04aa01")).toThrow();
+  });
+});
+
+describe("sending a message", () => {
+  /** A pool whose relays behave however the test says: resolve, reject, or never answer at all. */
+  const poolWith = (...behaviours: ("ok" | "fail" | "hang")[]) =>
+    ({
+      publish: () =>
+        behaviours.map((b) =>
+          b === "ok"
+            ? Promise.resolve("ok")
+            : b === "fail"
+              ? Promise.reject(new Error("relay said no"))
+              : new Promise<string>(() => {})
+        ),
+    }) as never;
+
+  it("counts the relays that accepted it", async () => {
+    const me = await party();
+    const them = await party();
+    const chat = new TradeChat(poolWith("ok", "fail", "ok"), ["a", "b", "c"], me.identity, 50);
+    await expect(chat.send(them.identity.publicKey, { type: "text", tradeId: "1", text: "hi" })).resolves.toBe(2);
+  });
+
+  it("does not wait forever on a relay that never answers", async () => {
+    const me = await party();
+    const them = await party();
+    const chat = new TradeChat(poolWith("hang", "ok"), ["a", "b"], me.identity, 50);
+    const started = Date.now();
+    await expect(chat.send(them.identity.publicKey, { type: "text", tradeId: "1", text: "hi" })).resolves.toBe(1);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it("says so when nothing got through, instead of hanging", async () => {
+    const me = await party();
+    const them = await party();
+    const chat = new TradeChat(poolWith("hang", "fail"), ["a", "b"], me.identity, 50);
+    await expect(chat.send(them.identity.publicKey, { type: "text", tradeId: "1", text: "hi" })).rejects.toThrow(/no relay accepted/i);
   });
 });

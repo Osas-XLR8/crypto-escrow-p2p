@@ -94,11 +94,31 @@ export async function verifyHello(received: ReceivedMessage, expectedWallet: Add
   );
 }
 
+/** A relay that accepts a connection and then never answers must not hold a send open forever. */
+const PUBLISH_TIMEOUT_MS = 10_000;
+
+function settleWithin<T>(promises: Promise<T>[], ms: number): Promise<PromiseSettledResult<T>[]> {
+  return Promise.all(
+    promises.map((p) =>
+      Promise.race([
+        p.then(
+          (value) => ({ status: "fulfilled", value }) as PromiseSettledResult<T>,
+          (reason) => ({ status: "rejected", reason }) as PromiseSettledResult<T>
+        ),
+        new Promise<PromiseSettledResult<T>>((resolve) =>
+          setTimeout(() => resolve({ status: "rejected", reason: new Error("relay did not answer") }), ms)
+        ),
+      ])
+    )
+  );
+}
+
 export class TradeChat {
   constructor(
     private readonly pool: SimplePool,
     private readonly relays: string[],
-    private readonly me: NostrIdentity
+    private readonly me: NostrIdentity,
+    private readonly publishTimeoutMs = PUBLISH_TIMEOUT_MS
   ) {}
 
   /**
@@ -107,12 +127,12 @@ export class TradeChat {
    */
   async send(recipientPubkey: string, message: TradeMessage): Promise<number> {
     const wrap = wrapTradeMessage(this.me, recipientPubkey, message);
-    const results = await Promise.allSettled(this.pool.publish(this.relays, wrap));
+    const results = await settleWithin(this.pool.publish(this.relays, wrap), this.publishTimeoutMs);
     const delivered = results.filter((r) => r.status === "fulfilled").length;
-    if (delivered === 0) throw new Error("message was not accepted by any relay");
+    if (delivered === 0) throw new Error("no relay accepted the message — check your connection and try again");
     if (recipientPubkey !== this.me.publicKey && message.type !== "hello") {
       const own = wrapTradeMessage(this.me, this.me.publicKey, message);
-      await Promise.allSettled(this.pool.publish(this.relays, own)); // best effort
+      await settleWithin(this.pool.publish(this.relays, own), this.publishTimeoutMs); // best effort
     }
     return delivered;
   }

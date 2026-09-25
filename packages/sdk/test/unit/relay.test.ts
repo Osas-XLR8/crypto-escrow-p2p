@@ -166,7 +166,7 @@ describe("TradeChat over relays", () => {
     const b = await party();
     relayB.setRejectAll(true);
     try {
-      await expect(new TradeChat(pool, [relayB.url], a.identity).send(b.identity.publicKey, { type: "text", tradeId: "1", text: "hi" })).rejects.toThrow(/not accepted/);
+      await expect(new TradeChat(pool, [relayB.url], a.identity).send(b.identity.publicKey, { type: "text", tradeId: "1", text: "hi" })).rejects.toThrow(/no relay accepted/);
     } finally {
       relayB.setRejectAll(false);
     }
