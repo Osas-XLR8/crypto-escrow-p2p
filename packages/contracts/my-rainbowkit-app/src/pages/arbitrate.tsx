@@ -48,6 +48,9 @@ export default function Arbitrate() {
   const [firmAddr, setFirmAddr] = useState<Address>(FIRMS[0]);
   const [selected, setSelected] = useState<bigint | undefined>();
   const [filter, setFilter] = useState<Filter | null>(null);
+  // How long the first read has been running. A desk that silently stays empty is the worst outcome here, so
+  // after a while it says what it is waiting on — usually a blocked or rate-limited RPC, not a broken page.
+  const [waiting, setWaiting] = useState(0);
 
   const desk = useQuery({
     queryKey: ["firm", firmAddr],
@@ -59,6 +62,13 @@ export default function Arbitrate() {
       return { firm, cases, panel };
     },
   });
+
+  useEffect(() => {
+    if (!desk.isLoading) return setWaiting(0);
+    const started = Date.now();
+    const id = setInterval(() => setWaiting(Math.round((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [desk.isLoading, firmAddr]);
 
   // Deep link: /arbitrate?firm=0x…&case=3
   useEffect(() => {
@@ -151,6 +161,18 @@ export default function Arbitrate() {
             </div>
           )}
         </Card>
+
+        {desk.isLoading && waiting >= 15 && (
+          <Notice tone="warn">
+            <div className="row-between">
+              <span>
+                Still reading firm {firmAddr.slice(0, 8)}… from the chain after {waiting}s. This page talks to the
+                network directly, so a blocked or rate-limited RPC endpoint looks exactly like this.
+              </span>
+              <Button size="sm" busy={desk.isFetching} onClick={() => void desk.refetch()}>Retry</Button>
+            </div>
+          </Notice>
+        )}
 
         {desk.error && (
           <Notice tone="error">
