@@ -18,11 +18,12 @@
     "seed:demo": "node scripts/seed-demo.mjs",
     "demo:dispute": "node scripts/demo-dispute.mjs",
     "staff:firms": "node scripts/staff-firms.mjs",
-    "seed:history": "node scripts/seed-history.mjs"
+    "seed:history": "node scripts/seed-history.mjs",
+    "demo:bots": "node scripts/demo-bots.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.25.2",
-    "viem": "^2.56.7"
+    "viem": "2.56.7"
   },
   "devDependencies": {
     "@types/node": "^22.20.3",

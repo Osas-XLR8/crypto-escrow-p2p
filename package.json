@@ -1,0 +1,12 @@
+{
+  "name": "escrowx",
+  "private": true,
+  "description": "Non-custodial P2P escrow with third-party arbitration. This root package exists for the demo environment and the cold-state check; each package under packages/ has its own dependencies.",
+  "scripts": {
+    "demo": "node scripts/demo.mjs",
+    "check:cold": "node scripts/cold-check.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

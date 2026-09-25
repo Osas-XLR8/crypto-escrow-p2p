@@ -14,6 +14,9 @@ const nextConfig = {
   reactStrictMode: true,
   output: 'export',
   trailingSlash: true,
+  // Say where this app's root is instead of letting Next guess from the nearest lockfile: a stray
+  // package-lock.json anywhere above the repo made it infer someone's home directory and warn on every boot.
+  outputFileTracingRoot: __dirname,
   images: { unoptimized: true },
   basePath,
   webpack: (config) => {

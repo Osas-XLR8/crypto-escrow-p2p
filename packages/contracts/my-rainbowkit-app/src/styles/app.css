@@ -128,15 +128,12 @@ code, .mono { font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, mo
 /* ── Header ─────────────────────────────────────────────────────────── */
 .header {
   position: sticky; top: 0; z-index: 50;
-  background: color-mix(in srgb, var(--bg) 82%, transparent);
-  backdrop-filter: saturate(1.4) blur(10px);
-  -webkit-backdrop-filter: saturate(1.4) blur(10px);
+  /* Opaque on purpose. This bar used to be translucent with a backdrop blur, which means the browser
+     re-rasterises everything behind it on every scroll frame; under a long list that produced a frame with a
+     blank band and the header apparently adrift, four review sessions running. A blur is not worth a product
+     that looks broken while you scroll it. */
+  background: var(--bg);
   border-bottom: 1px solid var(--border);
-  /* A blurred sticky bar is re-rasterised on every scroll frame, and a long list scrolling under it made
-     Chrome show a half-painted band with the header apparently adrift. Giving it its own compositor layer,
-     and telling the browser the backdrop is what changes, keeps the paint stable. */
-  transform: translateZ(0);
-  will-change: backdrop-filter;
 }
 
 /* Scroll anchoring inside a list that re-renders while you scroll (prices, countdowns, live offers) is what

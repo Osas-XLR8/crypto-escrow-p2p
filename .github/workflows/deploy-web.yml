@@ -96,6 +96,30 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  # What a first-time visitor sees, checked on the deployed site itself: a fresh browser profile with no wallet
+  # extension, loading the pages that promise to work in exactly that state. Everything we have ever got wrong
+  # in a way we couldn't see, we got wrong because we were already connected.
+  cold-check:
+    needs: deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Wait for the new build to be served
+        run: sleep 30
+      - name: Cold check
+        env:
+          COLD_CHECK_URL: ${{ needs.deploy.outputs.url }}
+        run: npm run check:cold

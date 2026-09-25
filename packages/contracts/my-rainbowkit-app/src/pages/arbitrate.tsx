@@ -231,7 +231,30 @@ export default function Arbitrate() {
             </div>
           </div>
         ) : (
-          <Card><div className="skeleton" style={{ width: "40%" }} /></Card>
+          <div className="split split-trades">
+            <div className="stack">
+              <Card title="Reading the firm from the chain…">
+                <div className="stack-sm">
+                  <div className="skeleton" style={{ width: "55%" }} />
+                  <div className="skeleton" style={{ width: "40%" }} />
+                  <div className="skeleton" style={{ width: "70%" }} />
+                </div>
+              </Card>
+            </div>
+            <div className="stack">
+              <Card title="Cases">
+                <div className="stack-sm">
+                  <div className="skeleton" style={{ width: "80%" }} />
+                  <div className="skeleton" style={{ width: "65%" }} />
+                  <div className="skeleton" style={{ width: "72%" }} />
+                </div>
+                <p className="small faint p0">
+                  Every panel, case and ruling here is read straight from the contracts — no server sits in
+                  between, so this takes as long as the network does.
+                </p>
+              </Card>
+            </div>
+          </div>
         )}
       </Shell>
     </>

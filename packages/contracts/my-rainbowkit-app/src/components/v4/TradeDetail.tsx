@@ -147,6 +147,13 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   const openerIsMe = me === d.opener.toLowerCase();
   const counterparty = isBuyer ? t.seller : isSeller ? t.buyer : undefined;
 
+  // Telling a buyer "the seller's details are in the chat" while the chat is empty is the worst thing this
+  // screen can do: a 30-minute clock is running and they can't tell whether to pay, wait, or cancel. The two
+  // states are kept apart, and the one we're in is read from the messages themselves.
+  const gotPaymentDetails = messages
+    .thread(id)
+    .some((m) => !m.mine && m.message.type === "payment_details" && messages.trusted(id, m.from));
+
   const fiat = terms.data ? fmtFiat(t.amount, terms.data.price, terms.data.fiatCurrency) : null;
 
   const countdown = (deadline: number) => (now <= deadline ? `in ${fmtDuration(deadline - now)}` : `${fmtDuration(now - deadline)} ago`);
@@ -174,9 +181,53 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   const actions: Act[] = [];
   const act = (rank: number, mine: boolean, node: ReactNode) => actions.push({ rank, mine, node });
 
+  if (isBuyer && t.state === TradeState.LOCKED && now <= paymentDeadline && identity && !gotPaymentDetails) {
+    // Nothing to pay to yet. This is the trade's real next step, and it isn't the buyer's.
+    act(Rank.NOW, false,
+      <ActionBox
+        key="awaiting-details"
+        title="Waiting for the seller's payment details"
+        note={`They haven't sent them yet. Don't pay until they arrive — you have nothing to pay to, and no way to prove where the money went.`}
+      >
+        <p className="small muted p0">
+          The payment window closes {countdown(paymentDeadline)} and the contract enforces it. If the details
+          never arrive, let it run out: the trade can then be cancelled, the seller gets their crypto back, and
+          you have lost nothing — as long as you haven&apos;t paid.
+        </p>
+        <div className="row" style={{ gap: 8 }}>
+          <Button
+            busy={busy === "nudge"}
+            disabled={!!busy || !messages.peer(id)}
+            title={messages.peer(id) ? undefined : "The seller hasn't opened the chat yet"}
+            onClick={() =>
+              run(
+                "nudge",
+                () => messages.send(id, { type: "text", text: "Could you send your payment details here? The payment window is running." }),
+                "Asked the seller for their payment details."
+              )
+            }
+          >
+            Ask for their details
+          </Button>
+        </div>
+      </ActionBox>
+    );
+  }
+
   if (isBuyer && t.state === TradeState.LOCKED && now <= paymentDeadline) {
-    act(Rank.NOW, true,
-      <ActionBox key="paid" title={fiat ? `Send ${fiat} to the seller, then confirm here` : "Pay the seller, then confirm here"} note={`Due ${countdown(paymentDeadline)}. The seller's details are in the private chat below.`}>
+    const ready = !identity || gotPaymentDetails;
+    act(ready ? Rank.NOW : Rank.EARLY, ready,
+      <ActionBox
+        key="paid"
+        title={fiat ? `Send ${fiat} to the seller, then confirm here` : "Pay the seller, then confirm here"}
+        note={
+          gotPaymentDetails
+            ? `Due ${countdown(paymentDeadline)}. The seller's details are in the private chat below.`
+            : identity
+              ? `Due ${countdown(paymentDeadline)}. Only use this if you already have their details some other way — nothing has arrived in the chat.`
+              : `Due ${countdown(paymentDeadline)}. Unlock messaging below to receive the seller's details.`
+        }
+      >
         <Field label="Transfer reference" hint="optional · sent privately to the seller"
           help={identity ? "Helps the seller find your payment in their banking app." : "Unlock messaging below to send the seller a reference with it."}>
           <input className="input mono" value={reference} onChange={(e) => setReference(e.target.value)} placeholder="e.g. OPY-7731-2026" maxLength={200} disabled={!identity} />
@@ -326,7 +377,12 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
   const others = ranked.filter((a) => a !== primary);
 
   const waitingFor =
-    t.state === TradeState.LOCKED ? (isSeller ? "Waiting for the buyer to send the money and mark this as paid." : null)
+    t.state === TradeState.LOCKED
+      ? isSeller
+        ? "Waiting for the buyer to send the money and mark this as paid."
+        : isBuyer && !gotPaymentDetails
+          ? "Waiting for the seller's payment details. Don't pay until they arrive."
+          : null
     : t.state === TradeState.PAID ? (isBuyer ? `Waiting for the seller to check their bank and release. If they don't, you can open a dispute ${countdown(releaseDeadline)}.` : null)
     : t.state === TradeState.FEE_PENDING ? (openerIsMe
         ? `Waiting for the other party to match the arbitration fee — due ${countdown(feeDeadline)}. If they don't, you can settle by default.`

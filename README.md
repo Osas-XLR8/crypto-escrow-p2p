@@ -25,6 +25,20 @@ A minimal, investor-safe P2P escrow demo:
 > to audit. Defects and the audit's own findings still get fixed; features don't get added.
 
 ## Quick Demo (Local)
+
+```bash
+npm run demo
+```
+
+One command: frees stale ports, clears the build cache, installs, starts a local chain, deploys the contracts,
+seeds a market with trade history and a recorded dispute, starts demo counterparties that answer trades you
+open, and serves the app on http://localhost:3200. Ctrl-C stops all of it.
+
+`npm run check:cold` loads the published site in a fresh browser profile with **no wallet extension** and fails
+if anything the app promises in that state is missing. It runs on every deploy.
+
+<details><summary>The longer way, step by step</summary>
+
 ### 1) Start local chain
 ```bash
 anvil
@@ -43,6 +57,8 @@ npm run dev -- -p 3001
 Open:
 
 http://localhost:3001
+
+</details>
 
 Architecture (High level)
 

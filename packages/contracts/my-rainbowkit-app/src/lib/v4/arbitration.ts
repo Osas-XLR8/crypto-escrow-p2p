@@ -52,21 +52,36 @@ export async function readFirm(client: PublicClient, address: Address): Promise<
   return { address, admin, pendingAdmin, treasury, fee, accruedFees, reviewPeriod: Number(reviewPeriod), caseCount: Number(caseCount) };
 }
 
-/** Every case the firm has received, newest first, with the escrow trade it belongs to. */
+/**
+ * Every case the firm has received, newest first, with the escrow trade it belongs to.
+ *
+ * Read in three rounds rather than a chain of three calls per case: each round is a single batch, so a firm
+ * with a dozen cases costs three round trips instead of thirty-six. On a public endpoint that is the
+ * difference between a desk that fills in immediately and one that looks broken for half a minute.
+ */
 export async function readCases(client: PublicClient, firm: FirmInfo): Promise<CaseInfo[]> {
   const ids = Array.from({ length: firm.caseCount }, (_, i) => BigInt(firm.caseCount - i));
-  return Promise.all(
-    ids.map(async (disputeId) => {
-      const c = await client.readContract({ ...adapter(firm.address), functionName: "getCase", args: [disputeId] });
-      const ours = c.arbitrable.toLowerCase() === V4.escrow.toLowerCase();
-      const tradeId = ours
-        ? await client.readContract({ address: V4.escrow, abi: escrowCoreV4Abi, functionName: "disputeToTrade", args: [firm.address, disputeId] })
-        : 0n;
-      const dispute =
-        tradeId > 0n
-          ? await client.readContract({ address: V4.escrow, abi: escrowCoreV4Abi, functionName: "getDispute", args: [tradeId] })
-          : null;
-      return {
+  const cases = await Promise.all(ids.map((disputeId) => client.readContract({ ...adapter(firm.address), functionName: "getCase", args: [disputeId] })));
+
+  const ours = cases.map((c) => c.arbitrable.toLowerCase() === V4.escrow.toLowerCase());
+  const tradeIds = await Promise.all(
+    ids.map((disputeId, i) =>
+      ours[i]
+        ? client.readContract({ address: V4.escrow, abi: escrowCoreV4Abi, functionName: "disputeToTrade", args: [firm.address, disputeId] })
+        : Promise.resolve(0n)
+    )
+  );
+  const disputes = await Promise.all(
+    tradeIds.map((tradeId) =>
+      tradeId > 0n ? client.readContract({ address: V4.escrow, abi: escrowCoreV4Abi, functionName: "getDispute", args: [tradeId] }) : Promise.resolve(null)
+    )
+  );
+
+  return ids.map((disputeId, i) => {
+    const c = cases[i]!;
+    const tradeId = tradeIds[i]!;
+    const dispute = disputes[i];
+    return {
         disputeId,
         tradeId,
         arbitrable: c.arbitrable,
@@ -77,10 +92,9 @@ export async function readCases(client: PublicClient, firm: FirmInfo): Promise<C
         executed: c.executed,
         startedAt: Number(dispute?.startedAt ?? 0n),
         escalated: dispute?.escalated ?? false,
-        opener: (dispute?.opener ?? "0x0000000000000000000000000000000000000000") as Address,
-      };
-    })
-  );
+      opener: (dispute?.opener ?? "0x0000000000000000000000000000000000000000") as Address,
+    };
+  });
 }
 
 const PANELIST_UPDATED = licensedArbitratorAdapterAbi.find((x) => x.type === "event" && x.name === "PanelistUpdated") as unknown as AbiEvent;
