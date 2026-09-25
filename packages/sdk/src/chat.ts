@@ -12,6 +12,7 @@ import type { SimplePool } from "nostr-tools/pool";
 import type { Address } from "viem";
 import { sameAddress, verifyBinding } from "./identity.js";
 import type { NostrIdentity, WalletBinding } from "./types.js";
+import { RELAY_PUBLISH_TIMEOUT_MS, settleWithin } from "./relayTimeout.js";
 
 const GIFT_WRAP_KIND = 1059;
 const CHAT_MESSAGE_KIND = 14;
@@ -94,31 +95,12 @@ export async function verifyHello(received: ReceivedMessage, expectedWallet: Add
   );
 }
 
-/** A relay that accepts a connection and then never answers must not hold a send open forever. */
-const PUBLISH_TIMEOUT_MS = 10_000;
-
-function settleWithin<T>(promises: Promise<T>[], ms: number): Promise<PromiseSettledResult<T>[]> {
-  return Promise.all(
-    promises.map((p) =>
-      Promise.race([
-        p.then(
-          (value) => ({ status: "fulfilled", value }) as PromiseSettledResult<T>,
-          (reason) => ({ status: "rejected", reason }) as PromiseSettledResult<T>
-        ),
-        new Promise<PromiseSettledResult<T>>((resolve) =>
-          setTimeout(() => resolve({ status: "rejected", reason: new Error("relay did not answer") }), ms)
-        ),
-      ])
-    )
-  );
-}
-
 export class TradeChat {
   constructor(
     private readonly pool: SimplePool,
     private readonly relays: string[],
     private readonly me: NostrIdentity,
-    private readonly publishTimeoutMs = PUBLISH_TIMEOUT_MS
+    private readonly publishTimeoutMs = RELAY_PUBLISH_TIMEOUT_MS
   ) {}
 
   /**

@@ -97,6 +97,15 @@ settles — four transactions, no involvement from the firm that went quiet.
 
 ---
 
+## Also on this deployment
+
+| Case | Trade | What it shows |
+|---|---|---|
+| #6 | #44 | A contested dispute against a market maker — the same path as case 2, but the loser is a maker with offers on the book, so the loss shows on its reputation badge. |
+| #4 | #41 | **A panelist declining to rule.** The case was opened by a run that crashed before either party filed anything; with no evidence to weigh, the panelist ruled "refuse", and the escrow returned the crypto to the seller. The ruling a firm should make when it has nothing to go on is also a ruling. |
+
+---
+
 ## What these records are not
 
 They are transactions on a test network, read through a UI that reads the chain. They show the mechanism

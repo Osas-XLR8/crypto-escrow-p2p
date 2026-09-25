@@ -10,6 +10,7 @@ export * from "./identity.js";
 export * from "./offerEvents.js";
 export * from "./offerBook.js";
 export * from "./chat.js";
+export * from "./relayTimeout.js";
 export * from "./evidence.js";
 export * from "./client.js";
 export { escrowCoreV4Abi } from "./abi/escrowCoreV4.js";

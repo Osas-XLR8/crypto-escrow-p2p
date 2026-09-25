@@ -4,6 +4,7 @@
 import { SimplePool } from "nostr-tools/pool";
 import type { Event, Filter } from "nostr-tools";
 import { OFFER_EVENT_KIND, OfferEventError, PROTOCOL_TAG, parseOfferEvent, type ParseOptions, type ParsedOffer } from "./offerEvents.js";
+import { RELAY_PUBLISH_TIMEOUT_MS, settleWithin } from "./relayTimeout.js";
 import type { OfferSide } from "./types.js";
 
 export interface OfferQuery {
@@ -53,8 +54,8 @@ export class OfferBook {
     return f;
   }
 
-  async publish(event: Event): Promise<PublishResult[]> {
-    const results = await Promise.allSettled(this.pool.publish(this.relays, event));
+  async publish(event: Event, timeoutMs = RELAY_PUBLISH_TIMEOUT_MS): Promise<PublishResult[]> {
+    const results = await settleWithin(this.pool.publish(this.relays, event), timeoutMs);
     return results.map((r, i) => ({
       relay: this.relays[i]!,
       ok: r.status === "fulfilled",

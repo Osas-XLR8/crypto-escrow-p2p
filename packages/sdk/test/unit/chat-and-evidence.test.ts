@@ -153,6 +153,15 @@ describe("sending a message", () => {
     expect(Date.now() - started).toBeLessThan(2000);
   });
 
+  it("lets an offer publish give up on a silent relay too", async () => {
+    const { OfferBook } = await import("../../src/index.js");
+    const book = new OfferBook(["a", "b"], { escrow: "0x0000000000000000000000000000000000000001" }, poolWith("hang", "ok"));
+    const started = Date.now();
+    const results = await book.publish({ id: "x" } as never, 50);
+    expect(results.map((r) => r.ok)).toEqual([false, true]);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
   it("says so when nothing got through, instead of hanging", async () => {
     const me = await party();
     const them = await party();
