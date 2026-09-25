@@ -3,9 +3,12 @@
 import type { ReactNode } from "react";
 import { useEscrowX } from "@/context/EscrowX";
 import { Button, Notice } from "@/components/ui";
+import { usePendingAction } from "@/hooks/usePendingAction";
+import { PendingNotice, pendingLabel } from "@/components/v4/Pending";
 
 export function MessagingGate({ children, reason }: { children: ReactNode; reason: string }) {
   const { identity, unlockMessaging, unlocking, unlockError, address, retention, setRetention } = useEscrowX();
+  const pending = usePendingAction();
   if (identity) return <>{children}</>;
   return (
     <div className="stack-sm">
@@ -31,13 +34,23 @@ export function MessagingGate({ children, reason }: { children: ReactNode; reaso
             <span>Stay unlocked on this device for 7 days — don&apos;t tick this on a shared computer.</span>
           </label>
           <div>
-            <Button variant="primary" onClick={() => void unlockMessaging()} disabled={!address} busy={unlocking}>
-              {unlocking ? "Waiting for signatures…" : "Unlock messaging"}
+            <Button
+              variant="primary"
+              disabled={!address || !!pending.busy}
+              busy={unlocking || !!pending.busy}
+              onClick={() =>
+                void pending.run("unlock", async () => {
+                  if (!(await unlockMessaging())) throw new Error("Messaging wasn't unlocked.");
+                }, { signature: true })
+              }
+            >
+              {pending.busy ? pendingLabel(pending, "") : "Unlock messaging"}
             </Button>
           </div>
         </div>
       </div>
-      {unlockError && <Notice tone="error">{unlockError}</Notice>}
+      <PendingNotice pending={pending} />
+      {!pending.busy && !pending.message && unlockError && <Notice tone="error">{unlockError}</Notice>}
     </div>
   );
 }

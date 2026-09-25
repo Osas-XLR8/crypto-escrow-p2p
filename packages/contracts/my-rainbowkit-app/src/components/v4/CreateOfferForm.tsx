@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import { useWalletClient } from "wagmi";
 import { buildOfferEvent, createBuyOffer, createOffer, signOffer, type OfferSide, type OfferTerms, type PublishResult } from "@escrowx/sdk";
 import { useEscrowX } from "@/context/EscrowX";
+import { usePendingAction } from "@/hooks/usePendingAction";
+import { PendingNotice, pendingLabel } from "@/components/v4/Pending";
 import { CHAIN_ID, FIAT_CURRENCIES, RELAYS, V4, arbitratorName } from "@/config/v4";
 import { Button, Card, Field, Notice, errorText } from "@/components/ui";
 import { MessagingGate } from "@/components/v4/MessagingGate";
@@ -37,7 +39,8 @@ export function CreateOfferForm({ initialSide = "sell", onPublished }: { initial
     releaseMinutes: "60",
     expiryHours: "24",
   });
-  const [busy, setBusy] = useState(false);
+  const pending = usePendingAction();
+  const busy = !!pending.busy;
   const [result, setResult] = useState<{ tone: "ok" | "error" | "warn"; text: string } | null>(null);
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF((s) => ({ ...s, [k]: e.target.value }));
 
@@ -55,9 +58,8 @@ export function CreateOfferForm({ initialSide = "sell", onPublished }: { initial
 
   async function publish() {
     if (!address || !walletClient || !client || !book || !identity || !binding) return;
-    setBusy(true);
     setResult(null);
-    try {
+    await pending.run("publish", async (ctx) => {
       if (!min || !max || !total) throw new Error("Enter valid token amounts");
       const terms: OfferTerms = {
         chainId: CHAIN_ID,
@@ -87,7 +89,11 @@ export function CreateOfferForm({ initialSide = "sell", onPublished }: { initial
 
       // Sell offers are backed by the vault; a buy offer is funded by whichever seller fills it.
       const free = selling ? await client.freeBalance(address, V4.usdt) : min;
+      // One signature, no transaction: say so, so nobody waits for a gas prompt that never comes.
+      ctx.step({ index: 1, total: 1, label: "Sign the offer (free, no gas)" });
+      ctx.phase("signing");
       const signature = await signOffer(walletClient as never, offer, CHAIN_ID, V4.escrow);
+      ctx.phase("checking");
       const event = buildOfferEvent({ offer, signature, terms, binding, identity });
       const results: PublishResult[] = await book.publish(event);
       const accepted = results.filter((r) => r.ok).length;
@@ -104,11 +110,7 @@ export function CreateOfferForm({ initialSide = "sell", onPublished }: { initial
               : " Buyers can take it now."),
       });
       onPublished?.();
-    } catch (e) {
-      setResult({ tone: "error", text: errorText(e) });
-    } finally {
-      setBusy(false);
-    }
+    });
   }
 
   return (
@@ -182,14 +184,23 @@ export function CreateOfferForm({ initialSide = "sell", onPublished }: { initial
 
           <div className="buy-summary">
             <div><span className="faint">Largest single trade</span><span className="mono">{max && priceOk ? fmtFiat(max, f.price, f.fiatCurrency) : "—"}</span></div>
+            <div><span className="faint">EscrowX fee</span><span className="mono strong">none · 0%</span></div>
             <div><span className="faint">If there&apos;s a dispute</span><span>{arbitratorName(V4.primaryArbitrator)} <span className="faint">→ fallback</span> {arbitratorName(V4.fallbackArbitrator)}</span></div>
+            <div className="faint tiny">
+              <span>
+                Posting is a signature — free, no gas. The escrow takes no cut of a trade; you pay gas on your own
+                transactions, and only a dispute costs anything (each side puts up the firm&apos;s fee, refunded to
+                whoever wins).
+              </span>
+            </div>
           </div>
 
-          {result && <Notice tone={result.tone}>{result.text}</Notice>}
+          <PendingNotice pending={pending} />
+          {!pending.busy && result && <Notice tone={result.tone}>{result.text}</Notice>}
 
           <div>
             <Button variant="primary" onClick={() => void publish()} disabled={!walletClient || !limitsOk || !priceOk || methods.length === 0} busy={busy}>
-              {busy ? "Sign in your wallet…" : selling ? "Sign & publish sell offer" : "Sign & publish buy offer"}
+              {busy ? pendingLabel(pending, "") : selling ? "Sign & publish sell offer" : "Sign & publish buy offer"}
             </Button>
           </div>
         </div>

@@ -15,6 +15,9 @@ import { useAccount, usePublicClient, useWalletClient } from "wagmi";
 import { adapterKeyFromNostrPubkey, decryptEvidence, keyFromHex, openEvidenceKey, parseEvidenceUri } from "@escrowx/sdk";
 import { useEscrowX } from "@/context/EscrowX";
 import { FIRMS, IS_TESTNET, V4, arbitratorName } from "@/config/v4";
+import { usePendingAction } from "@/hooks/usePendingAction";
+import { useWalletSession } from "@/hooks/useWalletSession";
+import { PendingNotice } from "@/components/v4/Pending";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { Shell } from "@/components/Shell";
 import { StateBadge } from "@/components/StateBadge";
@@ -38,7 +41,8 @@ const FILTERS: { key: Filter; label: string }[] = [
 ];
 
 export default function Arbitrate() {
-  const { address, isConnected } = useAccount();
+  const { address } = useAccount();
+  const { isConnected, resuming } = useWalletSession();
   const publicClient = usePublicClient();
   const trades = useV4Trades();
   const [firmAddr, setFirmAddr] = useState<Address>(FIRMS[0]);
@@ -131,13 +135,13 @@ export default function Arbitrate() {
         >
           <div className="row small">
             <span className="faint">You are</span>
-            {!isConnected ? <Chip>reading as a visitor</Chip> : isAdmin ? <Chip tone="accent">firm admin</Chip> : null}
+            {resuming ? <Chip>reconnecting your wallet…</Chip> : !isConnected ? <Chip>reading as a visitor</Chip> : isAdmin ? <Chip tone="accent">firm admin</Chip> : null}
             {isPanelist && <Chip tone="info">panelist</Chip>}
             {isConnected && !isAdmin && !isPanelist && <Chip>a visitor — read only</Chip>}
             {isConnected && counts.attention > 0 && <Chip tone="warn">{counts.attention} case{counts.attention === 1 ? " needs" : "s need"} you</Chip>}
             {IS_TESTNET && <span className="faint">· On this test network the deployer runs both demo firms.</span>}
           </div>
-          {!isConnected && (
+          {!isConnected && !resuming && (
             <div className="row-between" style={{ marginTop: 14, gap: 16, flexWrap: "wrap" }}>
               <span className="small muted">
                 Cases, panels, evidence and rulings are public — read them without a wallet. Connect one only to act as
@@ -257,29 +261,25 @@ function CaseStatus({ c, firm, now }: { c: CaseInfo; firm: FirmInfo; now: number
 function useFirmWrite(firm: FirmInfo, onChanged: () => void) {
   const publicClient = usePublicClient();
   const { data: wallet } = useWalletClient();
-  const [busy, setBusy] = useState<string | null>(null);
-  const [message, setMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+  const pending = usePendingAction();
   async function run(label: string, fn: Parameters<typeof writeFirm>[3], args: readonly unknown[], ok: string) {
     if (!publicClient || !wallet) return false;
-    setBusy(label);
-    setMessage(null);
-    try {
-      await writeFirm(publicClient as never, wallet as never, firm.address, fn, args);
-      setMessage({ tone: "ok", text: ok });
-      onChanged();
-      return true;
-    } catch (e) {
-      setMessage({ tone: "error", text: errorText(e) });
-      return false;
-    } finally {
-      setBusy(null);
-    }
+    let succeeded = false;
+    await pending.run(
+      label,
+      async (ctx) => {
+        await writeFirm(publicClient as never, wallet as never, firm.address, fn, args, (phase, hash) => ctx.phase(phase, hash));
+        succeeded = true;
+      },
+      { success: ok, onDone: onChanged }
+    );
+    return succeeded;
   }
-  return { busy, message, run };
+  return { busy: pending.busy, pending, run };
 }
 
 function FirmCard({ firm, isAdmin, isPendingAdmin, onChanged }: { firm: FirmInfo; isAdmin: boolean; isPendingAdmin: boolean; onChanged: () => void }) {
-  const { busy, message, run } = useFirmWrite(firm, onChanged);
+  const { busy, pending, run } = useFirmWrite(firm, onChanged);
   const [fee, setFee] = useState("");
   const [treasury, setTreasury] = useState("");
   const [newAdmin, setNewAdmin] = useState("");
@@ -340,7 +340,7 @@ function FirmCard({ firm, isAdmin, isPendingAdmin, onChanged }: { firm: FirmInfo
           </details>
         )}
         {isAdmin && <p className="help">You administer this firm: manage the panel, assign cases, and veto a ruling during its review period.</p>}
-        {message && <Notice tone={message.tone}>{message.text}</Notice>}
+        <PendingNotice pending={pending} />
       </div>
     </Card>
   );
@@ -348,7 +348,7 @@ function FirmCard({ firm, isAdmin, isPendingAdmin, onChanged }: { firm: FirmInfo
 
 function PanelCard({ firm, panel, isAdmin, onChanged }: { firm: FirmInfo; panel: { panelist: Address; key: Hex }[]; isAdmin: boolean; onChanged: () => void }) {
   const { address, identity } = useEscrowX();
-  const { busy, message, run } = useFirmWrite(firm, onChanged);
+  const { busy, pending, run } = useFirmWrite(firm, onChanged);
   const [who, setWho] = useState("");
   const [key, setKey] = useState("");
   const myKey = identity ? adapterKeyFromNostrPubkey(identity.publicKey) : null;
@@ -403,7 +403,7 @@ function PanelCard({ firm, panel, isAdmin, onChanged }: { firm: FirmInfo; panel:
             </div>
           </details>
         )}
-        {message && <Notice tone={message.tone}>{message.text}</Notice>}
+        <PendingNotice pending={pending} />
       </div>
     </Card>
   );
@@ -422,7 +422,7 @@ function CaseDetail({ firm, c, trade, panel, isAdmin, now, arbitrationTimeout, o
   onChanged: () => void;
 }) {
   const { address } = useEscrowX();
-  const { busy, message, run } = useFirmWrite(firm, onChanged);
+  const { busy, pending, run } = useFirmWrite(firm, onChanged);
   const [assignTo, setAssignTo] = useState<string>("");
   const [ruling, setRuling] = useState<bigint | null>(null);
   const [note, setNote] = useState("");
@@ -550,7 +550,7 @@ function CaseDetail({ firm, c, trade, panel, isAdmin, now, arbitrationTimeout, o
             </div>
           )}
 
-          {message && <Notice tone={message.tone}>{message.text}</Notice>}
+          <PendingNotice pending={pending} />
         </div>
       </Card>
 

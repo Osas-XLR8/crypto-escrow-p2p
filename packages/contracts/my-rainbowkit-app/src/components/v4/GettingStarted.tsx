@@ -6,8 +6,10 @@ import { erc20Abi } from "viem";
 import { useBalance, usePublicClient, useWalletClient } from "wagmi";
 import { useEscrowX } from "@/context/EscrowX";
 import { CHAIN, GAS_FAUCETS, IS_LOCAL, V4 } from "@/config/v4";
-import { Button, Card, Notice, errorText } from "@/components/ui";
+import { Button, Card } from "@/components/ui";
 import { claimFaucet } from "@/lib/v4/faucet";
+import { usePendingAction } from "@/hooks/usePendingAction";
+import { PendingNotice, pendingLabel } from "@/components/v4/Pending";
 
 const DISMISS_KEY = "escrowx:onboarding-dismissed";
 
@@ -17,8 +19,7 @@ export function GettingStarted() {
   const { data: walletClient } = useWalletClient();
   const gas = useBalance({ address, query: { refetchInterval: 10_000 } });
   const [dismissed, setDismissed] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const pending = usePendingAction();
 
   useEffect(() => {
     try {
@@ -42,7 +43,8 @@ export function GettingStarted() {
   // Test tokens are only needed to sell, so gas + messaging is enough to finish setup.
   const ready = hasGas && !!identity;
 
-  if (!address || dismissed || (ready && !error)) return null;
+  // Stay on screen while something is still pending or has just failed, so the explanation has somewhere to live.
+  if (!address || dismissed || (ready && !pending.busy && !pending.message)) return null;
 
   const dismiss = () => {
     setDismissed(true);
@@ -84,20 +86,15 @@ export function GettingStarted() {
             <span className="tiny faint">Worthless test dollars from the token&apos;s own faucet, 1,000 per hour.</span>
           </div>
           {!hasTokens && V4.tokenFaucet && (
-            <Button size="sm" busy={busy} disabled={!hasGas || !walletClient} title={!hasGas ? "Get test ETH first" : undefined}
-              onClick={async () => {
-                setBusy(true);
-                setError(null);
-                try {
-                  await claimFaucet(publicClient as never, walletClient as never);
-                  await token.refetch();
-                } catch (e) {
-                  setError(errorText(e));
-                } finally {
-                  setBusy(false);
-                }
-              }}>
-              Get 1,000 {V4.tokenSymbol}
+            <Button size="sm" busy={pending.busy === "faucet"} disabled={!hasGas || !walletClient || !!pending.busy} title={!hasGas ? "Get test ETH first" : undefined}
+              onClick={() =>
+                void pending.run(
+                  "faucet",
+                  (ctx) => claimFaucet(publicClient as never, walletClient as never, (phase, hash) => ctx.phase(phase, hash)),
+                  { success: `1,000 ${V4.tokenSymbol} sent to your wallet.`, onDone: () => void token.refetch() }
+                )
+              }>
+              {pending.busy === "faucet" ? pendingLabel(pending, "") : `Get 1,000 ${V4.tokenSymbol}`}
             </Button>
           )}
         </li>
@@ -116,11 +113,18 @@ export function GettingStarted() {
           {identity ? (
             <Button size="sm" variant="ghost" onClick={lockMessaging} title="Forget the messaging key on this browser">Lock</Button>
           ) : (
-            <Button size="sm" busy={unlocking} onClick={() => void unlockMessaging()}>Unlock</Button>
+            <Button size="sm" busy={unlocking || pending.busy === "unlock"} disabled={!!pending.busy}
+              onClick={() =>
+                void pending.run("unlock", async () => {
+                  if (!(await unlockMessaging())) throw new Error("Messaging wasn't unlocked.");
+                }, { signature: true, success: "Messaging unlocked." })
+              }>
+              {pending.busy === "unlock" ? pendingLabel(pending, "") : "Unlock"}
+            </Button>
           )}
         </li>
       </ol>
-      {error && <div style={{ padding: "0 18px 14px" }}><Notice tone="error">{error}</Notice></div>}
+      <div style={{ padding: "0 18px 14px" }}><PendingNotice pending={pending} /></div>
     </Card>
   );
 }

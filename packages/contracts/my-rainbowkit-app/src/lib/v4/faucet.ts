@@ -1,6 +1,6 @@
 // src/lib/v4/faucet.ts — TestUSDT's public faucet (testnets only).
 
-import type { Address, PublicClient, WalletClient } from "viem";
+import type { Address, Hex, PublicClient, WalletClient } from "viem";
 import { V4 } from "@/config/v4";
 
 export const testTokenAbi = [
@@ -13,10 +13,18 @@ export async function faucetAvailableAt(client: PublicClient, account: Address):
   return Number(await client.readContract({ address: V4.usdt, abi: testTokenAbi, functionName: "faucetAvailableAt", args: [account] }));
 }
 
-export async function claimFaucet(publicClient: PublicClient, wallet: WalletClient): Promise<void> {
+/** `report` lets the caller show which wait this is in — the wallet's, or the network's. */
+export async function claimFaucet(
+  publicClient: PublicClient,
+  wallet: WalletClient,
+  report?: (phase: "checking" | "signing" | "sent", hash?: Hex) => void
+): Promise<void> {
   if (!wallet.account) throw new Error("Connect a wallet first");
+  report?.("checking");
   const { request } = await publicClient.simulateContract({ address: V4.usdt, abi: testTokenAbi, functionName: "faucet", account: wallet.account });
+  report?.("signing");
   const hash = await wallet.writeContract(request);
+  report?.("sent", hash);
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
   if (receipt.status !== "success") throw new Error("Faucet transaction reverted");
 }

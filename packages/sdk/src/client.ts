@@ -52,6 +52,16 @@ export type OnchainDispute = {
   pool: bigint;
 };
 
+/**
+ * What a write is doing right now. "signing" is the wallet's prompt (abandonable); "sent" means a
+ * transaction exists on the network and only time will resolve it.
+ */
+export type Activity =
+  | { phase: "checking"; functionName: string }
+  | { phase: "signing"; functionName: string }
+  | { phase: "sent"; functionName: string; hash: Hex }
+  | { phase: "confirmed"; functionName: string; hash: Hex };
+
 /** A multi-transaction call reports each wallet prompt before it opens, so the UI can say "step 2 of 3". */
 export interface Step {
   index: number;
@@ -77,6 +87,28 @@ export class EscrowV4Client {
     readonly escrow: Address,
     readonly walletClient?: WalletClient
   ) {}
+
+  private listeners = new Set<(event: Activity) => void>();
+
+  /**
+   * Watch what a write is doing, so a UI can say which of the two waits it is in. The difference matters:
+   * waiting for a signature can be abandoned safely, waiting for a receipt cannot — the transaction is
+   * already out there, and retrying would send a second one.
+   */
+  onActivity(listener: (event: Activity) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private emit(event: Activity) {
+    for (const listener of this.listeners) {
+      try {
+        listener(event);
+      } catch {
+        /* a broken listener must not break the transaction */
+      }
+    }
+  }
 
   // ─── Reads ──────────────────────────────────────────────────────────────────
 
@@ -161,6 +193,7 @@ export class EscrowV4Client {
 
   private async write(functionName: string, args: readonly unknown[], value?: bigint) {
     const { wallet, account, chain } = this.wallet();
+    this.emit({ phase: "checking", functionName });
     const { request } = await this.publicClient.simulateContract({
       address: this.escrow,
       abi: escrowCoreV4Abi,
@@ -169,8 +202,11 @@ export class EscrowV4Client {
       account,
       value,
     } as never);
+    this.emit({ phase: "signing", functionName });
     const hash = await wallet.writeContract({ ...(request as object), chain } as never);
+    this.emit({ phase: "sent", functionName, hash });
     const receipt = await this.publicClient.waitForTransactionReceipt({ hash });
+    this.emit({ phase: "confirmed", functionName, hash });
     if (receipt.status !== "success") throw new Error(`${functionName} reverted (${hash})`);
     // Public RPCs are load-balanced: the next call can land on a node that hasn't seen this block yet, which
     // would simulate the following action against stale state. Wait until the endpoint has caught up.
@@ -190,6 +226,7 @@ export class EscrowV4Client {
   /** Sets the escrow's allowance to exactly `amount` and waits until the RPC can see it. */
   private async approveExactly(token: Address, amount: bigint) {
     const { wallet, account, chain } = this.wallet();
+    this.emit({ phase: "checking", functionName: "approve" });
     const { request } = await this.publicClient.simulateContract({
       address: token,
       abi: erc20Abi,
@@ -197,8 +234,11 @@ export class EscrowV4Client {
       args: [this.escrow, amount],
       account,
     });
+    this.emit({ phase: "signing", functionName: "approve" });
     const approveHash = await wallet.writeContract({ ...request, chain } as never);
+    this.emit({ phase: "sent", functionName: "approve", hash: approveHash });
     await this.publicClient.waitForTransactionReceipt({ hash: approveHash });
+    this.emit({ phase: "confirmed", functionName: "approve", hash: approveHash });
     // Load-balanced public RPCs can answer the next call from a node that hasn't seen the approval yet,
     // which makes the following simulation fail with "transferFrom failed". Wait until the allowance shows.
     await waitUntil(async () => {

@@ -12,6 +12,8 @@ import { usePublicClient } from "wagmi";
 import { buildCancelEvent, type OfferSide, type ParsedOffer } from "@escrowx/sdk";
 import { useEscrowX } from "@/context/EscrowX";
 import { useFirmPanels } from "@/hooks/useFirmPanels";
+import { usePendingAction } from "@/hooks/usePendingAction";
+import { PendingNotice, pendingLabel } from "@/components/v4/Pending";
 import { Reputation, useReputation } from "@/components/v4/Reputation";
 import { CHAIN_ID, FIAT_CURRENCIES, RELAYS, V4, arbitratorName } from "@/config/v4";
 import { Addr, Button, Card, Chip, Empty, Notice, errorText } from "@/components/ui";
@@ -232,9 +234,8 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
   const { offer: o, terms, side } = offer;
   const firm = panelStatus(o.arbitrator);
   const [amount, setAmount] = useState("");
-  const [busy, setBusy] = useState<string | null>(null);
-  const [progress, setProgress] = useState<{ index: number; total: number; label: string } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const pending = usePendingAction();
+  const busy = pending.busy;
 
   const isBuyOffer = side === "buy";
   const parsed = parseTokenInput(amount);
@@ -269,42 +270,33 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
 
   async function take() {
     if (!client || !parsed) return;
-    setError(null);
     const before = identity ? 0 : 1;
     const total = plan.length;
-    try {
+    await pending.run("take", async (ctx) => {
       if (!identity) {
         // Needed for the private chat (payment details); do it first so nobody is stuck mid-trade.
-        setBusy("unlock");
-        setProgress({ index: 1, total, label: plan[0]! });
-        if (!(await unlockMessaging())) return;
+        ctx.step({ index: 1, total, label: plan[0]! });
+        ctx.phase("signing");
+        const unlocked = await unlockMessaging();
+        if (!unlocked) throw new Error("Messaging wasn't unlocked, so the trade wasn't opened.");
       }
-      setBusy("take");
       const tradeId = await client.takeOffer(o, offer.signature, parsed, {
-        onStep: (step) => setProgress({ index: before + step.index, total, label: step.label }),
+        onStep: (step) => ctx.step({ index: before + step.index, total, label: step.label }),
       });
       onTaken(tradeId);
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setBusy(null);
-      setProgress(null);
-    }
+    });
   }
 
   async function cancel() {
     if (!client) return;
-    setBusy("cancel");
-    setError(null);
-    try {
-      await client.cancelOffer(o); // the hard guarantee: can never be taken again
-      if (book && identity) await book.publish(buildCancelEvent(offer, identity)); // hide it from order books
-      onChanged();
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setBusy(null);
-    }
+    await pending.run(
+      "cancel",
+      async () => {
+        await client.cancelOffer(o); // the hard guarantee: can never be taken again
+        if (book && identity) await book.publish(buildCancelEvent(offer, identity)); // hide it from order books
+      },
+      { success: "Offer cancelled on-chain and withdrawn from the relays.", onDone: onChanged }
+    );
   }
 
   const actionLabel = isBuyOffer ? "Sell" : "Buy";
@@ -335,7 +327,7 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
             {terms.paymentMethods.map((m) => <Chip key={m}>{m}</Chip>)}
           </div>
           <div className="small faint">
-            {isBuyOffer ? `Buyer pays within ${payMinutes} min` : `Pay within ${payMinutes} min`} · Disputes: {arbitratorName(o.arbitrator)}
+            {isBuyOffer ? `Buyer pays within ${payMinutes} min` : `Pay within ${payMinutes} min`} · No EscrowX fee · Disputes: {arbitratorName(o.arbitrator)}
             {!firm.staffed && (
               <> <Chip tone="warn" title="This firm has no panelists registered, so it cannot assign a dispute to anyone. A dispute here would only end on the escrow's timeout.">no panel yet</Chip></>
             )}
@@ -371,17 +363,13 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
               <Button variant="accent" block onClick={() => void take()} disabled={!address || !amountOk || !client || expiresIn <= 0} busy={!!busy}>
                 {!address
                   ? `Connect a wallet to ${actionLabel.toLowerCase()}`
-                  : progress && progress.total > 1
-                    ? `Step ${progress.index} of ${progress.total} · ${progress.label}`
-                    : busy === "unlock"
-                      ? "Unlock messaging in wallet…"
-                      : busy === "take"
-                        ? isBuyOffer ? "Locking your crypto…" : "Locking seller's crypto…"
-                          : parsed && !sellerCanFund
-                          ? `Not enough ${SYM}`
-                          : amountOk
-                            ? `${actionLabel} ${amount} ${terms.tokenSymbol}`
-                            : actionLabel}
+                  : busy
+                    ? pendingLabel(pending, "")
+                    : parsed && !sellerCanFund
+                      ? `Not enough ${SYM}`
+                      : amountOk
+                        ? `${actionLabel} ${amount} ${terms.tokenSymbol}`
+                        : actionLabel}
               </Button>
             </>
           )}
@@ -427,7 +415,7 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
           )}
         </div>
       )}
-      {error && <Notice tone="error">{error}</Notice>}
+      <PendingNotice pending={pending} />
     </article>
   );
 }

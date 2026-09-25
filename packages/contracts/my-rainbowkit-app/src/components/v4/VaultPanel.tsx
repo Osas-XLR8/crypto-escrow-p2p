@@ -5,6 +5,8 @@ import { useQuery } from "@tanstack/react-query";
 import { erc20Abi, formatEther, formatUnits } from "viem";
 import { usePublicClient, useWalletClient } from "wagmi";
 import { useEscrowX } from "@/context/EscrowX";
+import { usePendingAction } from "@/hooks/usePendingAction";
+import { PendingNotice, pendingLabel } from "@/components/v4/Pending";
 import { IS_TESTNET, V4 } from "@/config/v4";
 import { Button, Card, Field, Notice, errorText } from "@/components/ui";
 import { fmtDuration } from "@/lib/format";
@@ -16,8 +18,8 @@ export function VaultPanel() {
   const publicClient = usePublicClient();
   const { data: walletClient } = useWalletClient();
   const [amount, setAmount] = useState("");
-  const [busy, setBusy] = useState<string | null>(null);
-  const [message, setMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+  const pending = usePendingAction();
+  const busy = pending.busy;
   const showFaucet = IS_TESTNET && V4.tokenFaucet;
 
   const balances = useQuery({
@@ -40,19 +42,14 @@ export function VaultPanel() {
   const now = Math.floor(Date.now() / 1000);
   const faucetWait = b ? b.faucetAt - now : 0;
 
-  async function run(label: string, fn: () => Promise<unknown>, ok: string) {
-    setBusy(label);
-    setMessage(null);
-    try {
-      await fn();
-      setMessage({ tone: "ok", text: ok });
-      setAmount("");
-      await balances.refetch();
-    } catch (e) {
-      setMessage({ tone: "error", text: errorText(e) });
-    } finally {
-      setBusy(null);
-    }
+  function run(label: string, fn: (ctx: { step: (s: { index: number; total: number; label: string }) => void }) => Promise<unknown>, ok: string) {
+    void pending.run(label, fn, {
+      success: ok,
+      onDone: async () => {
+        setAmount("");
+        await balances.refetch();
+      },
+    });
   }
 
   return (
@@ -114,7 +111,7 @@ export function VaultPanel() {
           </Notice>
         )}
 
-        {message && <Notice tone={message.tone}>{message.text}</Notice>}
+        <PendingNotice pending={pending} />
 
         <p className="help">
           Held by the escrow contract under your address. Only you can withdraw what isn&apos;t locked in a trade — nobody can

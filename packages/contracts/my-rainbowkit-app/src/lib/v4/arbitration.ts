@@ -123,9 +123,12 @@ export async function writeFirm(
     | "setTreasury"
     | "transferFirmAdmin"
     | "acceptFirmAdmin",
-  args: readonly unknown[]
+  args: readonly unknown[],
+  /** Lets the desk say which wait it is in: the wallet's, or the network's. */
+  report?: (phase: "checking" | "signing" | "sent", hash?: Hex) => void
 ): Promise<void> {
   if (!wallet.account) throw new Error("Connect a wallet first");
+  report?.("checking");
   const { request } = await client.simulateContract({
     address: firm,
     abi: licensedArbitratorAdapterAbi,
@@ -133,7 +136,9 @@ export async function writeFirm(
     args: args as never,
     account: wallet.account,
   });
+  report?.("signing");
   const hash = await wallet.writeContract(request as never);
+  report?.("sent", hash);
   const receipt = await client.waitForTransactionReceipt({ hash });
   if (receipt.status !== "success") throw new Error("Transaction reverted");
 }

@@ -20,6 +20,8 @@ import {
 } from "@escrowx/sdk";
 import { useEscrowX } from "@/context/EscrowX";
 import { useFirmPanels } from "@/hooks/useFirmPanels";
+import { usePendingAction } from "@/hooks/usePendingAction";
+import { PendingNotice, pendingLabel } from "@/components/v4/Pending";
 import { Reputation, useReputation } from "@/components/v4/Reputation";
 import { V4, arbitratorName } from "@/config/v4";
 import { StateBadge } from "@/components/StateBadge";
@@ -93,25 +95,21 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
     },
   });
 
-  const [busy, setBusy] = useState<string | null>(null);
-  const [message, setMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+  // Every wallet action goes through one pending state: timeouts, hints, cancel and retry all live there.
+  const pending = usePendingAction();
+  const busy = pending.busy;
   const [confirmedFiat, setConfirmedFiat] = useState(false);
   const [receipt, setReceipt] = useState<File | null>(null);
   const [reference, setReference] = useState("");
 
-  async function run(label: string, fn: () => Promise<unknown>, ok: string) {
-    setBusy(label);
-    setMessage(null);
-    try {
-      await fn();
-      setMessage({ tone: "ok", text: ok });
-      await chain.refetch();
-      onChanged();
-    } catch (e) {
-      setMessage({ tone: "error", text: errorText(e) });
-    } finally {
-      setBusy(null);
-    }
+  function run(label: string, fn: () => Promise<unknown>, ok: string) {
+    void pending.run(label, fn, {
+      success: ok,
+      onDone: async () => {
+        await chain.refetch();
+        onChanged();
+      },
+    });
   }
 
   if (!chain.data || !client) {
@@ -189,7 +187,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
         </Field>
         <div>
           <Button variant="accent" busy={busy === "paid"} disabled={!!busy} onClick={() => run("paid", markPaid, "Marked as paid. The seller now checks their bank and releases.")}>
-            {busy === "paid" ? "Confirm in wallet…" : "I've paid"}
+            {busy === "paid" ? pendingLabel(pending, "") : "I've paid"}
           </Button>
         </div>
       </ActionBox>
@@ -209,7 +207,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
         </label>
         <div>
           <Button variant="accent" disabled={!confirmedFiat || !!busy} busy={busy === "release"} onClick={() => run("release", () => client.release(id), `Released ${fmtToken(t.amount)} ${SYM} to the buyer.`)}>
-            {busy === "release" ? "Confirm in wallet…" : `Release ${fmtToken(t.amount)} ${SYM}`}
+            {busy === "release" ? pendingLabel(pending, "") : `Release ${fmtToken(t.amount)} ${SYM}`}
           </Button>
         </div>
       </ActionBox>
@@ -363,6 +361,13 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
       </span>,
     ],
   ];
+  kvRows.push([
+    "Fees",
+    <span key="f">
+      EscrowX takes <strong>nothing</strong> from this trade
+      <span className="faint"> · you pay gas on your own transactions; a dispute costs {formatEther(primaryFee)} ETH per side, refunded to the winner</span>
+    </span>,
+  ]);
   if (t.state === TradeState.DISPUTED) kvRows.push(["Assigned panelist", assignee === zeroAddress ? "Not assigned yet" : shortAddr(assignee)]);
   if (deadline) kvRows.push([deadline.label, <span key="d" className="mono">{fmtTs(deadline.at)}</span>]);
 
@@ -416,7 +421,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
               <div className="stack-sm" style={{ marginTop: 10 }}>{others.map((a, i) => <div key={i}>{a.node}</div>)}</div>
             </details>
           )}
-          {message && <Notice tone={message.tone}>{message.text}</Notice>}
+          <PendingNotice pending={pending} />
 
           <details>
             <summary className="small faint" style={{ cursor: "pointer" }}>Trade details</summary>
@@ -521,14 +526,12 @@ function EvidenceCard({ tradeId, isBuyer, panelistKey, assignee, onSubmitted }: 
   const { client, identity } = useEscrowX();
   const stored = isBuyer ? loadEvidence(tradeId) : null;
   const [file, setFile] = useState<File | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+  const pending = usePendingAction();
+  const busy = pending.busy === "evidence";
 
   async function submit() {
     if (!client || !identity || !panelistKey) return;
-    setBusy(true);
-    setMessage(null);
-    try {
+    await pending.run("evidence", async () => {
       let ciphertext: Uint8Array;
       let key: Uint8Array;
       let commitment: Hex;
@@ -547,13 +550,10 @@ function EvidenceCard({ tradeId, isBuyer, panelistKey, assignee, onSubmitted }: 
       const sealed = sealEvidenceKey(identity, panelistKey, { tradeId: tradeId.toString(), commitment, key: keyToHex(key), mimeType: file?.type || stored?.mimeType });
       await client.submitEvidence(tradeId, formatEvidenceUri(identity.publicKey, panelistKey, sealed));
       downloadBytes(ciphertext, `trade-${tradeId}-${name}.enc`);
-      setMessage({ tone: "ok", text: "Evidence key sealed to the assigned panelist and recorded on-chain. Send the downloaded encrypted file to the arbitration firm through its case channel." });
-      onSubmitted();
-    } catch (e) {
-      setMessage({ tone: "error", text: errorText(e) });
-    } finally {
-      setBusy(false);
-    }
+    }, {
+      success: "Evidence key sealed to the assigned panelist and recorded on-chain. Send the downloaded encrypted file to the arbitration firm through its case channel.",
+      onDone: onSubmitted,
+    });
   }
 
   return (
@@ -573,9 +573,11 @@ function EvidenceCard({ tradeId, isBuyer, panelistKey, assignee, onSubmitted }: 
               <input className="file" type="file" accept="image/*,application/pdf" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
             </Field>
             <div>
-              <Button variant="primary" busy={busy} disabled={!file && !stored} onClick={() => void submit()}>Seal &amp; submit evidence</Button>
+              <Button variant="primary" busy={busy} disabled={!file && !stored} onClick={() => void submit()}>
+                {busy ? pendingLabel(pending, "") : "Seal & submit evidence"}
+              </Button>
             </div>
-            {message && <Notice tone={message.tone}>{message.text}</Notice>}
+            <PendingNotice pending={pending} />
           </div>
         )}
       </MessagingGate>

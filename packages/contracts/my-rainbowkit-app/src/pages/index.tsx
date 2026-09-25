@@ -10,6 +10,7 @@ import type { OfferSide } from "@escrowx/sdk";
 import { V4 } from "@/config/v4";
 import { Button, Card, Notice } from "@/components/ui";
 import { ConnectPrompt, Shell } from "@/components/Shell";
+import { useWalletSession } from "@/hooks/useWalletSession";
 import { MessagesProvider, useMessages } from "@/context/Messages";
 import { OfferMarket } from "@/components/v4/OfferMarket";
 import { CreateOfferForm } from "@/components/v4/CreateOfferForm";
@@ -79,7 +80,10 @@ function App({ tab, go, selected, selectTrade, trades }: {
   selectTrade: (id: bigint) => void;
   trades: V4TradesResult;
 }) {
-  const { address, isConnected } = useAccount();
+  const { address } = useAccount();
+  // While a session is being restored we render what a connected user sees, so a returning visitor never
+  // watches their own app turn into the first-run landing page and back.
+  const { isConnected, resuming } = useWalletSession();
   const messages = useMessages();
   const [offerSide, setOfferSide] = useState<OfferSide>("sell");
 
@@ -115,7 +119,8 @@ function App({ tab, go, selected, selectTrade, trades }: {
         </Notice>
       )}
 
-      {!isConnected && tab === "market" && <Hero />}
+      {!isConnected && !resuming && tab === "market" && <Hero />}
+      {resuming && <ResumingNotice />}
       {isConnected && <GettingStarted />}
 
       {tab === "market" && (
@@ -138,6 +143,8 @@ function App({ tab, go, selected, selectTrade, trades }: {
             <OfferMarket mode="mine" />
           </div>
         </div>
+      ) : resuming ? (
+        <ResumingSkeleton />
       ) : (
         <ConnectPrompt what="post offers" />
       ))}
@@ -172,10 +179,32 @@ function App({ tab, go, selected, selectTrade, trades }: {
             )}
           </div>
         </div>
+      ) : resuming ? (
+        <ResumingSkeleton />
       ) : (
         <ConnectPrompt what="see your trades" />
       ))}
     </Shell>
+  );
+}
+
+function ResumingNotice() {
+  return (
+    <Notice tone="info">
+      <span>Reconnecting your wallet… your trades and offers will appear in a moment.</span>
+    </Notice>
+  );
+}
+
+function ResumingSkeleton() {
+  return (
+    <div className="card" style={{ padding: 18 }}>
+      <div className="stack-sm">
+        <div className="skeleton" style={{ width: "35%" }} />
+        <div className="skeleton" style={{ width: "70%" }} />
+        <div className="skeleton" style={{ width: "55%" }} />
+      </div>
+    </div>
   );
 }
 
@@ -188,6 +217,11 @@ function Hero() {
         <p>
           Whoever sells has their crypto locked in a smart contract that only the two of you — or an independent arbitrator — can move.
           The buyer pays the seller directly. EscrowX never touches your money.
+        </p>
+        <p className="small faint" style={{ marginTop: 8 }}>
+          <strong>No trading fee.</strong> The escrow takes no cut — you pay network gas on your own transactions,
+          and nothing else unless a trade goes to dispute, where each side puts up the arbitration firm&apos;s fee
+          and the winner gets theirs back.
         </p>
         <div className="row" style={{ justifyContent: "center", marginTop: 24 }}>
           <ConnectButton label="Connect wallet to start" />
