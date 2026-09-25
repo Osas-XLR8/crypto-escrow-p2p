@@ -10,6 +10,7 @@
 //   node scripts/demo-dispute.mjs --chain 31337 --warp     # local Anvil, time warped past the review period
 //   PRIVATE_KEY=0x… node scripts/demo-dispute.mjs          # Base Sepolia, minutes end to end
 //   … --stop-at fee-pending                                # park a trade in one state to look at the UI
+//   … --contested                                          # both sides file evidence, not just the buyer
 //   … --opener buyer --warp                                # the buyer opens the dispute (needs the release
 //                                                            window to pass, so local chains only)
 //
@@ -38,6 +39,7 @@ import {
   sealEvidenceKey,
   signOffer,
 } from "../dist/index.js";
+import { getLogsChunked } from "./lib/logs.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const contracts = join(here, "../../contracts");
@@ -54,6 +56,8 @@ if (!chain) throw new Error(`Unsupported or non-test chain ${CHAIN_ID}`);
 const LOCAL = CHAIN_ID === 31337;
 const WARP = flag("warp");
 const STOP_AT = arg("stop-at", "done");
+/** Both parties file evidence, so the panelist has two accounts to weigh instead of one. */
+const CONTESTED = process.argv.includes("--contested");
 const OPENER = arg("opener", "seller");
 const STAGES = ["locked", "paid", "fee-pending", "disputed", "assigned", "evidence", "proposed", "done"];
 if (!STAGES.includes(STOP_AT)) throw new Error(`--stop-at must be one of: ${STAGES.join(", ")}`);
@@ -108,10 +112,16 @@ const walletFor = (account) => createWalletClient({ account, chain, transport: h
 
 const started = Date.now();
 const elapsed = () => `${((Date.now() - started) / 1000).toFixed(0)}s`;
+
+// Every transaction this run makes, so the case can be handed over as a record rather than a claim.
+const record = [];
+const note = (what, hash) => record.push({ at: elapsed(), what, hash });
+const EXPLORERS = { 84532: "https://base-sepolia.blockscout.com/tx/" };
 const step = (n, text) => console.log(`[${elapsed().padStart(4)}] ${n}. ${text}`);
 
-async function send(hashPromise) {
+async function send(hashPromise, label) {
   const hash = await hashPromise;
+  if (label) note(label, hash);
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
   if (receipt.status !== "success") throw new Error(`transaction ${hash} reverted`);
   // Public endpoints are load-balanced: the next read can land on a node that hasn't seen this block yet,
@@ -143,6 +153,12 @@ const buyer = derived("dispute-buyer");
 const panelist = derived("panelist");
 const sellerClient = new EscrowV4Client(publicClient, d.escrow, walletFor(seller));
 const buyerClient = new EscrowV4Client(publicClient, d.escrow, walletFor(buyer));
+// The client reports every transaction it sends, which is exactly the list this run needs to keep.
+for (const [who, client] of [["seller", sellerClient], ["buyer", buyerClient]]) {
+  client.onActivity((e) => {
+    if (e.phase === "sent") note(`${who}: ${e.functionName}`, e.hash);
+  });
+}
 const firm = d.primaryArbitrator;
 
 console.log(`Chain ${CHAIN_ID} · escrow ${d.escrow} · firm ${firm}`);
@@ -241,46 +257,79 @@ const disputeId = await matcher.payArbitrationFee(tradeId);
 step(5, `${OPENER === "seller" ? "buyer" : "seller"} matches the fee — case #${disputeId} is now with the firm`);
 stopHere("disputed");
 
-await send(deployerWallet.writeContract({ address: firm, abi: licensedArbitratorAdapterAbi, functionName: "assign", args: [disputeId, panelist.address] }));
+await send(deployerWallet.writeContract({ address: firm, abi: licensedArbitratorAdapterAbi, functionName: "assign", args: [disputeId, panelist.address] }), "firm: assign panelist");
 step(6, `firm assigns the case to a panelist (not a party to the trade — the contract checks)`);
 stopHere("assigned");
 
 // ─── 4. Evidence, sealed to the assigned panelist only ────────────────────────
+//
+// Both sides can file. With --contested the seller files too, and the panelist has to actually weigh two
+// accounts of the same trade instead of rubber-stamping the only one on offer.
 
 const buyerIdentity = await deriveNostrIdentity(walletFor(buyer), buyer.address);
-const sealed = sealEvidenceKey(buyerIdentity, panelistIdentity.publicKey, {
-  tradeId: tradeId.toString(),
-  commitment: evidence.commitment,
-  key: keyToHex(evidence.key),
-  mimeType: "text/plain",
-});
-await buyerClient.submitEvidence(tradeId, formatEvidenceUri(buyerIdentity.publicKey, panelistIdentity.publicKey, sealed));
-step(7, `buyer submits the decryption key, sealed so only the assigned panelist can open it`);
+const filings = [
+  { who: "buyer", client: buyerClient, identity: buyerIdentity, evidence, note: "the receipt for the transfer" },
+];
 
-// The panelist does what the desk does: read the event, open the key, check the fingerprint matches.
-const evidenceLogs = await publicClient.getLogs({
+if (CONTESTED) {
+  const statement = new TextEncoder().encode(
+    `Seller's statement for trade ${tradeId}: no credit appeared on the account ending 4471 between ` +
+      `${new Date().toISOString()} and the dispute. Bank statement attached; the reference the buyer quoted is not on it.`
+  );
+  const sellerEvidence = await encryptEvidence(statement);
+  filings.push({ who: "seller", client: sellerClient, identity: await deriveNostrIdentity(walletFor(seller), seller.address), evidence: sellerEvidence, note: "a bank statement showing nothing arrived" });
+}
+
+for (const filing of filings) {
+  const sealed = sealEvidenceKey(filing.identity, panelistIdentity.publicKey, {
+    tradeId: tradeId.toString(),
+    commitment: filing.evidence.commitment,
+    key: keyToHex(filing.evidence.key),
+    mimeType: "text/plain",
+  });
+  await filing.client.submitEvidence(tradeId, formatEvidenceUri(filing.identity.publicKey, panelistIdentity.publicKey, sealed));
+}
+step(7, `${filings.map((f) => `${f.who} files ${f.note}`).join("; ")} — each sealed so only the assigned panelist can open it`);
+
+// The panelist does what the desk does: read the events, open the keys, check the fingerprints match.
+const evidenceLogs = await getLogsChunked(publicClient, {
   address: d.escrow,
   event: escrowCoreV4Abi.find((x) => x.type === "event" && x.name === "Evidence"),
-  args: { evidenceGroupID: tradeId },
   fromBlock: BigInt(d.deployBlock ?? 0),
-  toBlock: "latest",
 });
-const parsed = parseEvidenceUri(evidenceLogs.at(-1).args.evidence);
-const opened = openEvidenceKey(panelistIdentity, parsed.senderPubkey, parsed.sealed);
-const plain = new TextDecoder().decode(await decryptEvidence(evidence.ciphertext, Buffer.from(opened.key.slice(2), "hex"), opened.commitment));
-step(8, `panelist opens it and checks it against the on-chain fingerprint: "${plain.slice(0, 48)}…"`);
+const mine = evidenceLogs.filter((l) => l.args.evidenceGroupID === tradeId);
+const read = [];
+for (const log of mine) {
+  const parsed = parseEvidenceUri(log.args.evidence);
+  if (!parsed || parsed.recipientPubkey !== panelistIdentity.publicKey) continue;
+  const opened = openEvidenceKey(panelistIdentity, parsed.senderPubkey, parsed.sealed);
+  const filing = filings.find((f) => f.identity.publicKey === parsed.senderPubkey);
+  if (!filing) continue;
+  const plain = new TextDecoder().decode(await decryptEvidence(filing.evidence.ciphertext, Buffer.from(opened.key.slice(2), "hex"), opened.commitment));
+  read.push({ who: filing.who, party: log.args.party, plain });
+}
+if (read.length !== filings.length) throw new Error(`panelist could only open ${read.length} of ${filings.length} filings`);
+for (const r of read) console.log(`         ${r.who} (${r.party}): "${r.plain.slice(0, 96)}…"`);
+step(8, `panelist opens ${read.length === 1 ? "it" : `both filings`} and checks each against its on-chain fingerprint`);
 stopHere("evidence");
 
 // ─── 5. The ruling ────────────────────────────────────────────────────────────
 
 const RULING_BUYER = 1n;
+// The decision hash is the fingerprint of the written reasons the firm keeps off-chain; what it covers is
+// what the panelist actually read.
+const reasons = CONTESTED
+  ? `Both filings opened. The buyer's receipt carries the reference and the amount for trade ${tradeId} and matches its on-chain fingerprint; the seller's statement shows an account that does not cover the window the receipt falls in. Ruling for the buyer.`
+  : `The buyer's receipt matches the payment they claimed and its on-chain fingerprint. Ruling for the buyer.`;
 await send(walletFor(panelist).writeContract({
   address: firm,
   abi: licensedArbitratorAdapterAbi,
   functionName: "proposeRuling",
-  args: [disputeId, RULING_BUYER, keccak256(toBytes("receipt matches the payment the buyer claimed"))],
-}));
-step(9, `panelist proposes: the buyer paid, so the crypto goes to the buyer`);
+  args: [disputeId, RULING_BUYER, keccak256(toBytes(reasons))],
+}), "panelist: propose ruling");
+step(9, CONTESTED
+  ? `panelist weighs both accounts and proposes: the buyer's evidence carries the day`
+  : `panelist proposes: the buyer paid, so the crypto goes to the buyer`);
 stopHere("proposed");
 
 if (WARP) {
@@ -299,7 +348,7 @@ if (WARP) {
   }
 }
 
-await send(deployerWallet.writeContract({ address: firm, abi: licensedArbitratorAdapterAbi, functionName: "executeRuling", args: [disputeId] }));
+await send(deployerWallet.writeContract({ address: firm, abi: licensedArbitratorAdapterAbi, functionName: "executeRuling", args: [disputeId] }), "firm: execute ruling");
 step(11, `the ruling executes: the escrow moves the locked crypto to the buyer`);
 
 // ─── 6. Did the money actually move? ──────────────────────────────────────────
@@ -313,7 +362,11 @@ const sellerRefund = await sellerClient.claimableNative(seller.address);
 console.log(`\nTrade #${tradeId} state ${trade.state} (5 = RELEASED)`);
 console.log(`Buyer  ${units(buyerVault)} tUSDT in vault · ${units(buyerBalance)} in wallet · ${formatEther(buyerRefund)} ETH fee refund waiting`);
 console.log(`Seller ${formatEther(sellerRefund)} ETH refund (the loser's fee pays the firm)`);
-console.log(`\nComplete dispute in ${elapsed()}.`);
+console.log("");
+console.log(`Case record — trade #${tradeId}, case #${disputeId}${CONTESTED ? ", contested (both sides filed)" : ""}:`);
+for (const r of record) console.log(`   ${r.at.padStart(4)}  ${r.what.padEnd(26)} ${EXPLORERS[CHAIN_ID] ? EXPLORERS[CHAIN_ID] + r.hash : r.hash}`);
+console.log("");
+console.log(`Complete dispute in ${elapsed()}.`);
 if (trade.state !== 5) {
   console.error("Expected the trade to be RELEASED to the buyer.");
   process.exit(1);

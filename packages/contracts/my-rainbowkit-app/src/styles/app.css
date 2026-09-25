@@ -132,7 +132,16 @@ code, .mono { font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, mo
   backdrop-filter: saturate(1.4) blur(10px);
   -webkit-backdrop-filter: saturate(1.4) blur(10px);
   border-bottom: 1px solid var(--border);
+  /* A blurred sticky bar is re-rasterised on every scroll frame, and a long list scrolling under it made
+     Chrome show a half-painted band with the header apparently adrift. Giving it its own compositor layer,
+     and telling the browser the backdrop is what changes, keeps the paint stable. */
+  transform: translateZ(0);
+  will-change: backdrop-filter;
 }
+
+/* Scroll anchoring inside a list that re-renders while you scroll (prices, countdowns, live offers) is what
+   jumps the viewport; the list has fixed rows, so it has nothing useful to anchor to. */
+.offer, .trade-row { overflow-anchor: none; }
 .header-inner { display: flex; align-items: center; gap: 16px; min-height: 60px; flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; }
 .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; margin-right: 8px; }
 .brand-mark {

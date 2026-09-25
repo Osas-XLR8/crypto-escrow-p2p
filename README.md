@@ -18,6 +18,8 @@ A minimal, investor-safe P2P escrow demo:
 - **Next.js web app** (RainbowKit/Wagmi): v4 reference client — two-sided relay order book (buy and sell offers),
   encrypted trade chat with on-chain milestones and notifications, disputes, arbitration desk.
   Builds to a static site; deploys to Base Sepolia + GitHub Pages (see [the app README](packages/contracts/my-rainbowkit-app/README.md#run-it))
+- **Arbitration case records** ([docs/case-records.md](docs/case-records.md)): every dispute path run end to end
+  on Base Sepolia, with the transactions — including a contested case where both sides filed sealed evidence.
 
 ## Quick Demo (Local)
 ### 1) Start local chain

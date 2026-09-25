@@ -1,0 +1,104 @@
+# Arbitration case records
+
+Every dispute path this escrow offers, run end to end on a public network, with the transactions that prove
+it. These are real cases on Base Sepolia — test money, real contracts, real time.
+
+Anyone can check them without a wallet: the [arbitration desk](https://osas-xlr8.github.io/crypto-escrow-p2p/arbitrate/)
+shows the case, the panel, the evidence entries and the ruling; the links below go to the transactions.
+
+Deployment (chain 84532):
+
+| | |
+|---|---|
+| Escrow | [`0xC63B71eDC6e4F8C5F4e2bf981F0BAe0775d7399C`](https://base-sepolia.blockscout.com/address/0xC63B71eDC6e4F8C5F4e2bf981F0BAe0775d7399C) |
+| Arbitration firm A (primary) | [`0x150dD59E62aD6C287Ed00f7394FF7f85E6fe622F`](https://base-sepolia.blockscout.com/address/0x150dD59E62aD6C287Ed00f7394FF7f85E6fe622F) |
+| Arbitration firm B (fallback) | [`0x286d151279Bc4aaa73bF6c39Ef7B4c9F3ba20716`](https://base-sepolia.blockscout.com/address/0x286d151279Bc4aaa73bF6c39Ef7B4c9F3ba20716) |
+| Test token | [`0x35Cf099D71B00715F8A36251F39102F923A93804`](https://base-sepolia.blockscout.com/address/0x35Cf099D71B00715F8A36251F39102F923A93804) |
+
+The two firms have **separate panels** and **treasuries separate from their admin keys**, so escalation moves a
+case to different people, not just a different contract.
+
+---
+
+## Case 1 — a ruling, start to finish (trade #1)
+
+The plain path: a buyer says they paid, the seller says they didn't see it, a panelist reads the evidence and
+rules. Opened and settled in **44 seconds**.
+
+Readable on the desk as *Case #1 · Ruled: buyer · RELEASED*. The trade ended with 20 tUSDT released to the
+buyer and the buyer's arbitration fee refunded; the seller's fee paid the firm.
+
+---
+
+## Case 2 — a **contested** case: both sides filed evidence (trade #2)
+
+The case worth showing. Both parties submitted sealed evidence and the panelist had two accounts of the same
+trade to weigh — the buyer's receipt against the seller's bank statement. **60 seconds**, eleven transactions.
+
+| At | What | Transaction |
+|---|---|---|
+| 15s | seller: approve | [`0x8ab1da…`](https://base-sepolia.blockscout.com/tx/0x8ab1dade39a60ddd8aa8fdc485cad94d618f4ccc70e8034888fef6076a611f26) |
+| 18s | seller: deposit into the vault | [`0x6acba0…`](https://base-sepolia.blockscout.com/tx/0x6acba030c10e119c31956cc7ee981a634a676c31ebc4a171640f2c29f212c9ae) |
+| 23s | buyer: take the offer — 20 tUSDT locked | [`0xc7cfd9…`](https://base-sepolia.blockscout.com/tx/0xc7cfd987d75a71fffc42831b96dd725aec8719b9d45150b4927352e8f88af66c) |
+| 27s | buyer: mark paid, with the receipt's fingerprint | [`0xcda3de…`](https://base-sepolia.blockscout.com/tx/0xcda3de0ea69b98875ea509d406fa94090bad30272d0b521aff6938ecc635e326) |
+| 31s | seller: open a dispute (0.0005 ETH) | [`0x9b8315…`](https://base-sepolia.blockscout.com/tx/0x9b83150a99b86a6e9b694ea6d5a9ddd296dc44b812c75bdf33afde8918932137) |
+| 34s | buyer: match the fee — case created | [`0xe9424a…`](https://base-sepolia.blockscout.com/tx/0xe9424a78ceebd9aab051611cca929481e735baacafc8e1639c353c2d38998930) |
+| 39s | firm: assign a panelist | [`0xe82806…`](https://base-sepolia.blockscout.com/tx/0xe82806cf31a59e41a48e2ab2cb3c4ee13ca083cbbac9241c6f5950aab299e563) |
+| 42s | **buyer: file evidence** (receipt) | [`0xb1988f…`](https://base-sepolia.blockscout.com/tx/0xb1988fd5c8c2294952bd4ef9eb58c48be3ead97bfe9349d86e9bc9a6be2f8026) |
+| 46s | **seller: file evidence** (bank statement) | [`0x092d02…`](https://base-sepolia.blockscout.com/tx/0x092d0267960db0f58043064e8e07e0fee4f59e57dac08954cb76ffd72a67fb54) |
+| 52s | panelist: propose a ruling for the buyer | [`0x4d2f31…`](https://base-sepolia.blockscout.com/tx/0x4d2f31d2393d8dddb24036063b34202cf1eb03a3074dcfd09e33b23ad3c25e42) |
+| 56s | firm: confirm and execute the ruling | [`0x2168dc…`](https://base-sepolia.blockscout.com/tx/0x2168dc765af3d8af1565e34e6dff63e481c301ed4218b3490d8f16c4de9f6ccd) |
+
+What the panelist actually did: opened both sealed filings with their own key, checked each ciphertext against
+the fingerprint the party had put on-chain *before* the dispute existed, and ruled. Neither filing is readable
+by the other party, by the firm, or by anyone reading the chain — only by the assigned panelist.
+
+The firm executed the ruling without waiting out its review window. It is allowed to do that on a case it did
+not decide itself: that window exists so the firm can veto its panelist, and the firm confirming in person is
+that review. A panelist holding the admin key gets no such shortcut.
+
+Reproduce it: `npm run demo:dispute -- --contested` (from `packages/sdk`).
+
+---
+
+## Case 3 — fee forfeit: the other side never paid (trade #3) · *window closes 26 Sep 2026, 06:54 UTC*
+
+A dispute where the counterparty simply doesn't match the arbitration fee. After the escrow's fee window
+(24 hours — the contract's own minimum, unshortenable), anyone can settle it in the opener's favour.
+
+Opened 25 Sep 2026. Trade #3 is sitting in `FEE_PENDING` on Base Sepolia right now; the desk and the app both
+show the countdown. Finish it with:
+
+```
+node scripts/finish-timeout.mjs --trade 3
+```
+
+The same path, proven end to end on a local chain where the clock can be moved:
+`node scripts/demo-dispute.mjs --chain 31337 --stop-at fee-pending` then
+`node scripts/finish-timeout.mjs --chain 31337 --trade <id> --warp` → trade CANCELLED, opener's fee refunded,
+the side that walked away lost by default.
+
+---
+
+## Case 4 — escalation: the firm went quiet (trade #4) · *window closes 2 Oct 2026*
+
+A dispute the first firm never rules on. After the escrow's arbitration timeout (7 days — again the contract
+minimum), either party can move the case to the fallback firm, which has its own panel.
+
+Opened 25 Sep 2026. Trade #4 is sitting in `DISPUTED` with firm A, unassigned. Finish it with:
+
+```
+node scripts/finish-timeout.mjs --trade 4
+```
+
+Proven end to end locally in the same way (`--stop-at disputed`, then `finish-timeout --warp`): the buyer
+escalates, firm B assigns **its own** panelist, that panelist rules, the ruling executes, and the trade
+settles — four transactions, no involvement from the firm that went quiet.
+
+---
+
+## What these records are not
+
+They are transactions on a test network, read through a UI that reads the chain. They show the mechanism
+working. They are **not** an audit, and nobody should present them as one: this is pre-audit software, and the
+footer of the app says so for a reason.
