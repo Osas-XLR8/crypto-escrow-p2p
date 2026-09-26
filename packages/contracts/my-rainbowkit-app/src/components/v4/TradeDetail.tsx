@@ -22,7 +22,7 @@ import { useEscrowX } from "@/context/EscrowX";
 import { useFirmPanels } from "@/hooks/useFirmPanels";
 import { usePendingAction } from "@/hooks/usePendingAction";
 import { PendingNotice, pendingLabel } from "@/components/v4/Pending";
-import { Reputation, useReputation } from "@/components/v4/Reputation";
+import { DisputeWarning, Reputation, useReputation } from "@/components/v4/Reputation";
 import { V4, arbitratorName } from "@/config/v4";
 import { StateBadge } from "@/components/StateBadge";
 import { Addr, Button, Card, Field, KV, Notice, TxLink, errorText } from "@/components/ui";
@@ -459,6 +459,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
             )}
             <div className="small muted row" style={{ gap: 6 }}>{roleLine}</div>
             {counterparty && <Reputation stats={reputationOf(counterparty)} address={counterparty} detailed />}
+            {counterparty && open && <DisputeWarning stats={reputationOf(counterparty)} />}
           </div>
 
           <Progress state={t.state} summary={summary} />

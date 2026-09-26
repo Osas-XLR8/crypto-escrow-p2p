@@ -14,7 +14,7 @@ import { useEscrowX } from "@/context/EscrowX";
 import { useFirmPanels } from "@/hooks/useFirmPanels";
 import { usePendingAction } from "@/hooks/usePendingAction";
 import { PendingNotice, pendingLabel } from "@/components/v4/Pending";
-import { Reputation, useReputation } from "@/components/v4/Reputation";
+import { DisputeWarning, Reputation, useReputation } from "@/components/v4/Reputation";
 import { CHAIN_ID, FIAT_CURRENCIES, RELAYS, V4, arbitratorName } from "@/config/v4";
 import { Addr, Button, Card, Chip, Empty, Notice, errorText } from "@/components/ui";
 import { fmtDuration } from "@/lib/format";
@@ -391,6 +391,8 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
             {expiresIn <= 0 && <Chip tone="danger">expired</Chip>}
           </div>
           <Reputation stats={reputationOf(offer.maker)} />
+          {/* Only appears for the few makers whose record warrants it — see DisputeWarning. */}
+          <DisputeWarning stats={reputationOf(offer.maker)} />
           <div className="row" style={{ gap: 6 }}>
             <span className="tiny faint">{isBuyOffer ? "Pays with" : "Accepts"}</span>
             {terms.paymentMethods.map((m) => <Chip key={m}>{m}</Chip>)}
