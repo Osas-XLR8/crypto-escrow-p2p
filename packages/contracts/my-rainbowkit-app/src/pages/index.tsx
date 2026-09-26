@@ -7,7 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { useAccount } from "wagmi";
 import type { OfferSide } from "@escrowx/sdk";
-import { V4 } from "@/config/v4";
+import { SITE_URL, V4 } from "@/config/v4";
 import { Button, Card, Notice } from "@/components/ui";
 import { ConnectPrompt, Shell } from "@/components/Shell";
 import { useWalletSession } from "@/hooks/useWalletSession";
@@ -31,32 +31,44 @@ export default function Home() {
   const [selected, setSelected] = useState<bigint | undefined>();
   const trades = useV4Trades();
 
+  // The URL is the only thing a person can copy, bookmark or hand to someone else. It should say where they
+  // are: leaving ?trade=49 in the bar while they browse the Market means a link sent to a friend opens
+  // somebody else's trade, and the back button walks the browser off the app instead of back a tab.
   const go = useCallback((next: Tab) => {
     setTab(next);
+    setSelected(undefined);
+    window.history.pushState(null, "", next === "market" ? "./" : `?tab=${next}`);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }, []);
 
   const selectTrade = useCallback((id: bigint) => {
     setSelected(id);
     setTab("trades");
-    window.history.replaceState(null, "", `?trade=${id}`);
+    window.history.pushState(null, "", `?trade=${id}`);
   }, []);
 
   useTradeAlerts(trades.trades, address, selectTrade);
 
-  // Deep links: /?trade=12, /?tab=offers
+  // Deep links: /?trade=12, /?tab=offers. Runs on load and again on every back/forward — pushing history
+  // entries without reading them back would give a URL that changes while the page underneath does not.
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const t = params.get("trade");
-    const requested = params.get("tab");
-    if (t && /^\d+$/.test(t)) {
-      setSelected(BigInt(t));
-      setTab("trades");
-    } else if (requested === "offers" || requested === "sell") {
-      setTab("offers");
-    } else if (requested === "trades" || requested === "market") {
-      setTab(requested);
-    }
+    const applyUrl = () => {
+      const params = new URLSearchParams(window.location.search);
+      const t = params.get("trade");
+      const requested = params.get("tab");
+      if (t && /^\d+$/.test(t)) {
+        setSelected(BigInt(t));
+        setTab("trades");
+        return;
+      }
+      setSelected(undefined);
+      if (requested === "offers" || requested === "sell") setTab("offers");
+      else if (requested === "trades") setTab("trades");
+      else setTab("market");
+    };
+    applyUrl();
+    window.addEventListener("popstate", applyUrl);
+    return () => window.removeEventListener("popstate", applyUrl);
   }, []);
 
   return (
@@ -65,6 +77,19 @@ export default function Home() {
         <title>EscrowX — peer-to-peer crypto, non-custodial</title>
         <meta name="description" content="Buy and sell stablecoins for local currency, peer to peer. Funds sit in a contract only the parties and independent arbitrators control." />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        {/* An offer gets shared in WhatsApp and Telegram, where a link with no card reads as spam. */}
+        <meta property="og:type" content="website" />
+        <meta property="og:site_name" content="EscrowX" />
+        <meta property="og:title" content="EscrowX — trade crypto for cash, without trusting us" />
+        <meta property="og:description" content="Funds sit in a contract only you, your counterparty and an independent arbitrator can move. Encrypted chat, public arbitration, no custody." />
+        <meta property="og:url" content={SITE_URL} />
+        <meta property="og:image" content={`${SITE_URL}og.png`} />
+        <meta property="og:image:width" content="1200" />
+        <meta property="og:image:height" content="630" />
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:title" content="EscrowX — trade crypto for cash, without trusting us" />
+        <meta name="twitter:description" content="Non-custodial P2P escrow with encrypted chat and public arbitration." />
+        <meta name="twitter:image" content={`${SITE_URL}og.png`} />
       </Head>
       <MessagesProvider trades={trades.trades} onOpenTrade={selectTrade}>
         <App tab={tab} go={go} selected={selected} selectTrade={selectTrade} trades={trades} />

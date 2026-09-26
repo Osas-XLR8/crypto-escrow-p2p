@@ -49,7 +49,7 @@ export function MessagingGate({ children, reason }: { children: ReactNode; reaso
           </div>
         </div>
       </div>
-      <PendingNotice pending={pending} />
+      <PendingNotice pending={pending} shows="this panel" />
       {!pending.busy && !pending.message && unlockError && <Notice tone="error">{unlockError}</Notice>}
     </div>
   );

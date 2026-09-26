@@ -23,6 +23,8 @@ import { fmtFiat, fmtToken, parseTokenInput, rememberTradeTerms, termsFromOffer 
 /** Rejections that mean "someone tried to fake or tamper with an offer" (not just old or for another deployment). */
 /** Below this, a "median" is just one person's opinion. */
 const MIN_FOR_MEDIAN = 3;
+/** A slow relay is not an empty market — see the emptyConfirmed effect below. */
+const EMPTY_GRACE_MS = 1500;
 
 const FORGERY = new Set(["bad_nostr_signature", "malformed_content", "terms_mismatch", "bad_offer_signature", "bad_binding", "binding_mismatch", "tag_mismatch"]);
 const SYM = V4.tokenSymbol;
@@ -112,6 +114,20 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
   // A price means nothing on its own: 1,592 NGN is a bargain or a rip-off depending on what everyone else is
   // asking. The median of the live offers on this side is the most honest reference available without
   // trusting a price feed — it's the same data on screen, and it can't be moved by one outlier.
+  // "Nobody is selling tUSDT for NGN" is a strong claim, and book.fetch() cannot support it on its own: it
+  // resolves once the relays it reached have answered, and a straggler can still deliver offers over the
+  // subscription a moment later. Declaring the market empty the instant a fetch comes back with nothing is
+  // why switching currency flashed that message on a market that had offers. Give the stragglers a beat.
+  const [emptyConfirmed, setEmptyConfirmed] = useState(false);
+  useEffect(() => {
+    if (!loaded || loading || shown.length > 0) {
+      setEmptyConfirmed(false);
+      return;
+    }
+    const t = setTimeout(() => setEmptyConfirmed(true), EMPTY_GRACE_MS);
+    return () => clearTimeout(t);
+  }, [loaded, loading, shown.length]);
+
   const prices = shown.map((o) => Number(o.terms.price)).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
   const median = prices.length >= MIN_FOR_MEDIAN
     ? prices.length % 2 ? prices[(prices.length - 1) / 2]! : (prices[prices.length / 2 - 1]! + prices[prices.length / 2]!) / 2
@@ -125,14 +141,14 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
           {forged > 0 && <Notice tone="warn">{forged} offer{forged === 1 ? "" : "s"} failed signature checks and {forged === 1 ? "was" : "were"} hidden.</Notice>}
         </div>
       )}
-      {!loaded && (
+      {(!loaded || (shown.length === 0 && !emptyConfirmed && !relayError)) && (
         <div className="stack-sm" style={{ padding: 18 }}>
           <div className="skeleton" style={{ width: "40%" }} />
           <div className="skeleton" style={{ width: "75%" }} />
           <div className="skeleton" style={{ width: "60%" }} />
         </div>
       )}
-      {loaded && shown.length === 0 && !relayError && (
+      {loaded && emptyConfirmed && shown.length === 0 && !relayError && (
         mode === "mine" ? (
           <Empty title="No offers yet">Post one below — to sell crypto, or to buy it.</Empty>
         ) : (
@@ -151,6 +167,18 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
           </span>
           <span className="mono strong" title={`Middle price of the ${prices.length} live offers listed here. Not a price feed — it's this market, right now.`}>
             {median.toLocaleString("en-US")} {currency} <span className="faint">· {prices.length} offers</span>
+          </span>
+        </div>
+      )}
+      {/* Say why the bar is missing. Seeing a median on one tab and nothing on the other reads as a bug,
+          when it is the threshold doing its job: a "median" of two offers is just somebody's price. */}
+      {mode === "market" && median === undefined && prices.length > 0 && (
+        <div className="row-between small" style={{ padding: "12px 18px", borderBottom: "1px solid var(--border)" }}>
+          <span className="faint">
+            Market median · {intent === "buy" ? "asks" : "bids"} on {SYM}/{currency}
+          </span>
+          <span className="faint" title={`A median needs at least ${MIN_FOR_MEDIAN} live offers to mean anything. With ${prices.length}, it would just be one trader's price wearing a statistic's clothes.`}>
+            too few offers · {prices.length} of {MIN_FOR_MEDIAN}
           </span>
         </div>
       )}
@@ -243,6 +271,22 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
   const available = funds ? funds.vault + funds.wallet : undefined;
   const sellerCanFund = !isBuyOffer || !parsed || available === undefined || parsed <= available;
   const amountOk = !!parsed && parsed >= o.minAmount && parsed <= cap && sellerCanFund;
+  // A button that greys out without saying why is a dead end. The amount box is the one field a person can
+  // get wrong here, and every limit it can break is already on screen — so quote it back at them. Stays
+  // quiet while the box is empty: nobody needs to be told off for not having typed yet.
+  const amountProblem = !amount.trim() || amountOk
+    ? null
+    : !parsed
+      ? "Enter an amount in numbers"
+      : parsed < o.minAmount
+        ? `Minimum is ${fmtToken(o.minAmount)} ${terms.tokenSymbol} per trade`
+        : parsed > cap
+          ? remaining !== undefined && remaining < o.maxAmount
+            ? `Only ${fmtToken(cap)} ${terms.tokenSymbol} left on this offer`
+            : `Maximum is ${fmtToken(cap)} ${terms.tokenSymbol} per trade`
+          : !sellerCanFund && available !== undefined
+            ? `You have ${fmtToken(available)} ${SYM} — lower the amount or top up`
+            : null;
   const expiresIn = Number(o.expiry) - Math.floor(Date.now() / 1000);
   const filledPct = remaining === undefined || o.totalAmount === 0n ? 0 : Number(((o.totalAmount - remaining) * 1000n) / o.totalAmount) / 10;
   const payMinutes = Number(o.paymentWindow) / 60;
@@ -340,7 +384,9 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
           <div className="stack-xs">
             <div className="row-between small">
               <span className="faint">{isBuyOffer ? "Still wants" : "Available"}</span>
-              <span className="mono strong">{remaining === undefined ? "…" : fmtToken(remaining)} {terms.tokenSymbol}</span>
+              {remaining === undefined
+                ? <span className="skeleton" style={{ width: 72, height: 14, display: "inline-block" }} aria-label={`Reading how much ${terms.tokenSymbol} is left`} />
+                : <span className="mono strong">{fmtToken(remaining)} {terms.tokenSymbol}</span>}
             </div>
             <div className="meter" aria-hidden><span style={{ width: `${100 - filledPct}%` }} /></div>
             <div className="row-between tiny faint">
@@ -357,6 +403,7 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
                 <input className="input mono" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder={`${fmtToken(o.minAmount)} – ${fmtToken(cap)}`} inputMode="decimal" aria-label={`Amount of ${terms.tokenSymbol} to ${actionLabel.toLowerCase()}`} />
                 <span className="affix">{terms.tokenSymbol}</span>
               </div>
+              {amountProblem && <div className="tiny" role="alert" style={{ color: "var(--danger)" }}>{amountProblem}</div>}
               {isBuyOffer && address && available !== undefined && (
                 <div className="tiny faint">You have {fmtToken(available)} {SYM} <span className="mono">(vault {fmtToken(funds!.vault)} · wallet {fmtToken(funds!.wallet)})</span></div>
               )}

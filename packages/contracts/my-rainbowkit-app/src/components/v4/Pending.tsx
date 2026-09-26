@@ -19,7 +19,12 @@ export function pendingLabel(pending: PendingApi, fallback: string): string {
   return fallback;
 }
 
-export function PendingNotice({ pending }: { pending: PendingApi }) {
+/**
+ * `shows` names whatever screen will reflect the result, so the "already sent" hint can say where to look.
+ * The default suits a trade; a vault deposit or an offer lands somewhere else entirely, and telling someone
+ * to watch the trade for a deposit is how a finished action looks unfinished.
+ */
+export function PendingNotice({ pending, shows = "the trade" }: { pending: PendingApi; shows?: string }) {
   const { busy, phase, waited, stuck, hash, step, message, cancel, retry, dismiss } = pending;
 
   if (!busy) {
@@ -69,7 +74,7 @@ export function PendingNotice({ pending }: { pending: PendingApi }) {
         {sent && waited >= HINT_AFTER_MS && (
           <span className="small faint">
             This is already on the network, so it can&apos;t be taken back or sent twice. Leaving this page is
-            safe — the trade will show the result when it lands.
+            safe — {shows} will show the result when it lands.
           </span>
         )}
       </div>

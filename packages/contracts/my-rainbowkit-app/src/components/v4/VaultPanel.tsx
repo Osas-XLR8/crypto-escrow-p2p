@@ -111,7 +111,7 @@ export function VaultPanel() {
           </Notice>
         )}
 
-        <PendingNotice pending={pending} />
+        <PendingNotice pending={pending} shows="your vault balance" />
 
         <p className="help">
           Held by the escrow contract under your address. Only you can withdraw what isn&apos;t locked in a trade — nobody can

@@ -1,6 +1,7 @@
 // src/components/v4/CreateOfferForm.tsx — sign an offer (to sell or to buy) and publish it to Nostr relays.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useWalletClient } from "wagmi";
 import { buildOfferEvent, createBuyOffer, createOffer, signOffer, type OfferSide, type OfferTerms, type PublishResult } from "@escrowx/sdk";
 import { useEscrowX } from "@/context/EscrowX";
@@ -9,7 +10,7 @@ import { PendingNotice, pendingLabel } from "@/components/v4/Pending";
 import { CHAIN_ID, FIAT_CURRENCIES, RELAYS, V4, arbitratorName } from "@/config/v4";
 import { Button, Card, Field, Notice, errorText } from "@/components/ui";
 import { MessagingGate } from "@/components/v4/MessagingGate";
-import { fmtFiat, parseTokenInput } from "@/lib/v4/local";
+import { fmtFiat, fmtToken, parseTokenInput } from "@/lib/v4/local";
 
 const METHOD_SUGGESTIONS: Record<string, string[]> = {
   NGN: ["Bank transfer", "Opay", "PalmPay", "Moniepoint", "Kuda"],
@@ -42,12 +43,56 @@ export function CreateOfferForm({ initialSide = "sell", onPublished }: { initial
   const pending = usePendingAction();
   const busy = !!pending.busy;
   const [result, setResult] = useState<{ tone: "ok" | "error" | "warn"; text: string } | null>(null);
-  const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF((s) => ({ ...s, [k]: e.target.value }));
+  const set = (k: keyof typeof f) => (e: { target: { value: string } }) => {
+    edited.current.add(k);
+    setF((s) => ({ ...s, [k]: e.target.value }));
+  };
+
+  // Fields the person has actually typed in. Seeding a sensible default is helpful; overwriting something
+  // they chose is not, so anything they touch is theirs from then on.
+  const edited = useRef(new Set<string>());
+
+  // What is actually backing this offer, read live. "Total to sell: 1,000" against a vault holding 100 is
+  // not something to discover at the moment of publishing — the offer goes out and no buyer can take it.
+  const vault = useQuery({
+    queryKey: ["offer-form-vault", address, selling],
+    enabled: !!client && !!address && selling,
+    refetchInterval: 15_000,
+    queryFn: () => client!.freeBalance(address!, V4.usdt),
+  });
+
+  // The going rate on this side of this market, so a price can be judged as it is typed rather than after
+  // the offer is live and nobody takes it. Same data the Market tab shows; not a price feed.
+  const marketSide = selling ? "sell" : "buy";
+  const reference = useQuery({
+    queryKey: ["offer-form-median", f.fiatCurrency, marketSide],
+    enabled: !!book,
+    staleTime: 30_000,
+    queryFn: async () => {
+      const res = await book!.fetch({ chainId: CHAIN_ID, fiatCurrency: f.fiatCurrency, side: marketSide });
+      const prices = res.offers.map((o) => Number(o.terms.price)).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
+      if (prices.length < 3) return { median: null as number | null, count: prices.length };
+      const mid = prices.length % 2 ? prices[(prices.length - 1) / 2]! : (prices[prices.length / 2 - 1]! + prices[prices.length / 2]!) / 2;
+      return { median: mid, count: prices.length };
+    },
+  });
 
   const min = parseTokenInput(f.min);
   const max = parseTokenInput(f.max);
   const total = parseTokenInput(f.total);
   const priceOk = /^\d+(\.\d+)?$/.test(f.price.trim()) && Number(f.price) > 0;
+
+  // Seed the total from what is actually in the vault, once, before the person has touched the field.
+  useEffect(() => {
+    if (!selling || vault.data === undefined || edited.current.has("total")) return;
+    setF((s) => ({ ...s, total: fmtToken(vault.data) }));
+  }, [selling, vault.data]);
+
+  const overVault = selling && vault.data !== undefined && !!total && total > vault.data;
+  const priceGap = reference.data?.median && priceOk
+    ? ((Number(f.price) - reference.data.median) / reference.data.median) * 100
+    : null;
+
   const limitsOk = !!min && !!max && !!total && min <= max && max <= total;
   const methods = f.paymentMethods.split(",").map((m) => m.trim()).filter(Boolean);
 
@@ -134,30 +179,47 @@ export function CreateOfferForm({ initialSide = "sell", onPublished }: { initial
           </div>
           <div className="fields">
             <Field label="Currency">
-              <select className="input" value={f.fiatCurrency} onChange={set("fiatCurrency")}>
+              <select className="input" value={f.fiatCurrency} onChange={set("fiatCurrency")} aria-label="Fiat currency">
                 {FIAT_CURRENCIES.map((c) => <option key={c}>{c}</option>)}
               </select>
             </Field>
             <Field label="Price" hint={`${f.fiatCurrency} per ${V4.tokenSymbol}`}>
-              <input className="input mono" value={f.price} onChange={set("price")} inputMode="decimal" aria-invalid={!priceOk} />
+              <input className="input mono" value={f.price} onChange={set("price")} inputMode="decimal" aria-invalid={!priceOk} aria-label={`Price in ${f.fiatCurrency} per ${V4.tokenSymbol}`} />
+              {reference.data?.median ? (
+                <p className="help">
+                  Market median {reference.data.median.toLocaleString("en-US")} {f.fiatCurrency}
+                  {priceGap !== null && (
+                    <> · yours is <span className="mono">{priceGap >= 0 ? "+" : ""}{priceGap.toFixed(1)}%</span>{" "}
+                      {Math.abs(priceGap) < 0.05 ? "— level with the market" : selling === priceGap > 0 ? "— worse for your counterparty" : "— better for your counterparty"}</>
+                  )}
+                </p>
+              ) : reference.data ? (
+                <p className="help">No median yet — only {reference.data.count} live offer{reference.data.count === 1 ? "" : "s"} on this side.</p>
+              ) : null}
             </Field>
           </div>
 
           <div className="fields">
             <Field label="Min per trade" hint={V4.tokenSymbol}>
-              <input className="input mono" value={f.min} onChange={set("min")} inputMode="decimal" />
+              <input className="input mono" value={f.min} onChange={set("min")} inputMode="decimal" aria-label={`Smallest single trade, in ${V4.tokenSymbol}`} />
             </Field>
             <Field label="Max per trade" hint={V4.tokenSymbol}>
-              <input className="input mono" value={f.max} onChange={set("max")} inputMode="decimal" />
+              <input className="input mono" value={f.max} onChange={set("max")} inputMode="decimal" aria-label={`Largest single trade, in ${V4.tokenSymbol}`} />
             </Field>
             <Field label={selling ? "Total to sell" : "Total to buy"} hint={V4.tokenSymbol}>
-              <input className="input mono" value={f.total} onChange={set("total")} inputMode="decimal" />
+              <input className="input mono" value={f.total} onChange={set("total")} inputMode="decimal" aria-label={selling ? `Total ${V4.tokenSymbol} to sell` : `Total ${V4.tokenSymbol} to buy`} aria-invalid={overVault} />
             </Field>
           </div>
           {!limitsOk && <p className="help warn-text">Limits must satisfy min ≤ max ≤ total.</p>}
+          {overVault && (
+            <p className="help warn-text">
+              Your vault holds {fmtToken(vault.data!)} {V4.tokenSymbol}. An offer above that can be taken only up to what is
+              there, so the rest of it is advertising you can&apos;t honour — deposit more, or lower the total.
+            </p>
+          )}
 
           <Field label="Payment methods" hint={selling ? "how buyers can pay you" : "how you can pay sellers"}>
-            <input className="input" value={f.paymentMethods} onChange={set("paymentMethods")} />
+            <input className="input" value={f.paymentMethods} onChange={set("paymentMethods")} aria-label="Payment methods you accept, comma separated" />
           </Field>
           <div className="row" style={{ gap: 6, marginTop: -8 }}>
             {(METHOD_SUGGESTIONS[f.fiatCurrency] ?? []).map((m) => (
@@ -168,7 +230,7 @@ export function CreateOfferForm({ initialSide = "sell", onPublished }: { initial
           </div>
 
           <Field label="Conditions" hint="public — never put account numbers here">
-            <input className="input" value={f.conditions} onChange={set("conditions")} />
+            <input className="input" value={f.conditions} onChange={set("conditions")} aria-label="Public conditions shown on your offer" />
           </Field>
 
           <details className="inset" style={{ padding: "10px 14px" }}>
@@ -176,9 +238,9 @@ export function CreateOfferForm({ initialSide = "sell", onPublished }: { initial
               Timing <span className="faint" style={{ fontWeight: 400 }}>· payment within {f.paymentMinutes} min · release within {f.releaseMinutes} min · expires in {f.expiryHours} h</span>
             </summary>
             <div className="fields" style={{ marginTop: 12 }}>
-              <Field label={selling ? "Buyer pays within" : "You pay within"} hint="10–180 min"><input className="input mono" value={f.paymentMinutes} onChange={set("paymentMinutes")} inputMode="numeric" /></Field>
-              <Field label={selling ? "You release within" : "Seller releases within"} hint="30–1440 min"><input className="input mono" value={f.releaseMinutes} onChange={set("releaseMinutes")} inputMode="numeric" /></Field>
-              <Field label="Offer expires in" hint="hours"><input className="input mono" value={f.expiryHours} onChange={set("expiryHours")} inputMode="numeric" /></Field>
+              <Field label={selling ? "Buyer pays within" : "You pay within"} hint="10–180 min"><input className="input mono" value={f.paymentMinutes} onChange={set("paymentMinutes")} inputMode="numeric" aria-label="Minutes the buyer has to pay" /></Field>
+              <Field label={selling ? "You release within" : "Seller releases within"} hint="30–1440 min"><input className="input mono" value={f.releaseMinutes} onChange={set("releaseMinutes")} inputMode="numeric" aria-label="Minutes the seller has to release" /></Field>
+              <Field label="Offer expires in" hint="hours"><input className="input mono" value={f.expiryHours} onChange={set("expiryHours")} inputMode="numeric" aria-label="Hours until this offer expires" /></Field>
             </div>
           </details>
 
@@ -195,7 +257,7 @@ export function CreateOfferForm({ initialSide = "sell", onPublished }: { initial
             </div>
           </div>
 
-          <PendingNotice pending={pending} />
+          <PendingNotice pending={pending} shows="your offer" />
           {!pending.busy && result && <Notice tone={result.tone}>{result.text}</Notice>}
 
           <div>

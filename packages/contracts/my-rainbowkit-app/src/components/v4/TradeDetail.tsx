@@ -4,7 +4,7 @@
 // Every button maps 1:1 to an EscrowCoreV4 function and is only shown when the contract would accept it
 // from this wallet at this time. Nothing here asks EscrowX for permission — there is no EscrowX in the loop.
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { formatEther, zeroAddress, zeroHash, type Address, type Hex } from "viem";
 import { usePublicClient } from "wagmi";
@@ -111,6 +111,18 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
       },
     });
   }
+
+  // A success message describes the moment it was written. "Marked as paid. The seller now checks their
+  // bank and releases." is true for as long as that is what is happening — and false the instant the seller
+  // releases, which on a fast counterparty is a couple of seconds later. Leaving it up puts a stale
+  // instruction directly under a RELEASED badge. So when the trade moves on, the message goes.
+  const chainState = chain.data?.trade.state;
+  const lastState = useRef<number | undefined>(chainState);
+  useEffect(() => {
+    if (chainState === undefined) return;
+    if (lastState.current !== undefined && lastState.current !== chainState) pending.dismiss();
+    lastState.current = chainState;
+  }, [chainState, pending]);
 
   if (!chain.data || !client) {
     return (

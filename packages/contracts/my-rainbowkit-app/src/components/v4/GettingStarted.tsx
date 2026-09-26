@@ -124,7 +124,7 @@ export function GettingStarted() {
           )}
         </li>
       </ol>
-      <div style={{ padding: "0 18px 14px" }}><PendingNotice pending={pending} /></div>
+      <div style={{ padding: "0 18px 14px" }}><PendingNotice pending={pending} shows="your balances" /></div>
     </Card>
   );
 }

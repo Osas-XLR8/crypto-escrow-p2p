@@ -101,3 +101,12 @@ export const explorerTx = (hash: string) => (EXPLORER ? `${EXPLORER}/tx/${hash}`
 export const explorerAddress = (addr: string) => (EXPLORER ? `${EXPLORER}/address/${addr}` : null);
 
 export const FIAT_CURRENCIES = ["NGN", "KES", "GHS", "ZAR", "BRL", "INR"] as const;
+
+/**
+ * Where this build is served from, absolute and with a trailing slash.
+ *
+ * Link previews need it: Open Graph consumers won't resolve a relative og:image, so a WhatsApp or Telegram
+ * share falls back to a bare link with no card. Set NEXT_PUBLIC_SITE_URL when deploying anywhere other than
+ * the project's GitHub Pages site.
+ */
+export const SITE_URL = (process.env.NEXT_PUBLIC_SITE_URL || "https://osas-xlr8.github.io/crypto-escrow-p2p/").replace(/\/?$/, "/");
