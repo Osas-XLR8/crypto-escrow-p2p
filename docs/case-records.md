@@ -137,6 +137,40 @@ Reproduce it: `npm run demo:dispute -- --contested --firm fallback`.
 
 ---
 
+## Trade #48 — the same path, run fresh on 26 Sep 2026 (case #7)
+
+Trade #2 is the walkthrough; this is the proof the walkthrough still describes the deployment as it stands
+today. A contested dispute, both sides filing, opened and settled in **64 seconds** measured from the
+seller's first transaction to the ruling executing — block timestamps, not a stopwatch.
+
+| At | What | Transaction |
+|---|---|---|
+| 0s | seller: approve | [`0x708dbe…`](https://base-sepolia.blockscout.com/tx/0x708dbec89b3af4ee2cdc17c7c55abc8054ca775b0ae20830b66eb54f5c45dc8f) |
+| 4s | seller: deposit into the vault | [`0xdb322f…`](https://base-sepolia.blockscout.com/tx/0xdb322f7ddc7c3a427c84acc649c562622e2c4d06f215334243da35533b2b737d) |
+| 9s | buyer: take the offer — 20 tUSDT locked | [`0x8f07cf…`](https://base-sepolia.blockscout.com/tx/0x8f07cf690bcb5f8cd516b612de3ae014393d2a4670c066e3b26d929f8e738b19) |
+| 14s | buyer: mark paid, with the receipt's fingerprint | [`0x308cbe…`](https://base-sepolia.blockscout.com/tx/0x308cbe27dcfd139c2f7aa6dbbe674517112e0706be68097ddf93091f6e7ce300) |
+| 20s | seller: open a dispute (0.0005 ETH) | [`0x0886c4…`](https://base-sepolia.blockscout.com/tx/0x0886c47f41bc93aba4711e7a43a9f7ab0d33e7cb6000bf6ca71245d854376b3a) |
+| 25s | buyer: match the fee — case #7 created | [`0x57e156…`](https://base-sepolia.blockscout.com/tx/0x57e1562b477b7a26b7a56647ffb1511fd4324885bee9367e4d16441ccbd5a3fd) |
+| 30s | firm: assign a panelist | [`0xd17f16…`](https://base-sepolia.blockscout.com/tx/0xd17f167c66df9849ec3afb34be1f4686f94c954a43feaa2a774c7afc582f0b9e) |
+| 34s | **buyer: file evidence** (receipt) | [`0xfa3a2b…`](https://base-sepolia.blockscout.com/tx/0xfa3a2bb8614d625771e768c97265145560bfc87815c4648145c98c66d47f39a6) |
+| 38s | **seller: file evidence** (bank statement) | [`0x54efec…`](https://base-sepolia.blockscout.com/tx/0x54efecbc8c9ea6c065b8498dcce1e7aa3142045eb0e376bcd64b8b15fff1fa9a) |
+| 60s | panelist: propose a ruling for the buyer | [`0xd8d451…`](https://base-sepolia.blockscout.com/tx/0xd8d45104486d76aa565d6502d48e4b65ce6e2368c9f3f3b002e803686f5dc1d2) |
+| 63s | firm: confirm and execute the ruling | [`0x6e4c10…`](https://base-sepolia.blockscout.com/tx/0x6e4c102b7c095ff1cc5d4f9002a875795bc56b468d165a2054c34e73b63883c9) |
+
+Afterwards the chain says: trade #48 `RELEASED`, `Ruling(disputeID 7, ruling 1)` from firm A, 20 tUSDT in the
+buyer's wallet and their 0.0005 ETH fee claimable back; the seller's fee paid the firm.
+
+The parties here are two wallets that existed only for this case. That is not decoration: the demo
+counterparty bots serve every wallet the demo market uses, and they release a trade the moment it is marked
+paid — which is the state a dispute has to be opened from. Running this on the usual dispute wallets would
+have raced the bots for the trade. Anyone reproducing it against a live demo should pass their own labels:
+
+```
+npm run demo:dispute -- --contested --seller my-seller --buyer my-buyer
+```
+
+---
+
 ## Also on this deployment
 
 | Trade | Case | What it shows |
