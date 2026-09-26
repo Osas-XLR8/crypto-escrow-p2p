@@ -424,3 +424,27 @@ select.input { padding-right: 28px; }
 .toast-ok { border-left-color: var(--accent); }
 .toast-warn { border-left-color: var(--warn); }
 @keyframes toast-in { from { transform: translateY(8px); opacity: 0; } }
+
+/* A finished trade. The tick draws itself once, on arrival — a trade completing is worth a beat of
+   attention, and it is the only animation in the app that fires without the person doing something.
+   Anyone who has asked not to see motion gets the same panel, still. */
+.complete {
+  display: flex; gap: 12px; align-items: flex-start;
+  padding: 14px 16px; border-radius: var(--radius);
+  background: var(--accent-soft); border: 1px solid var(--accent-line);
+}
+.complete-tick {
+  flex: none; width: 26px; height: 26px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--accent); color: var(--accent-ink);
+  font-size: 15px; font-weight: 700; line-height: 1;
+  animation: complete-pop .42s cubic-bezier(.2, 1.3, .4, 1) both;
+}
+@keyframes complete-pop {
+  from { transform: scale(.4); opacity: 0; }
+  60%  { transform: scale(1.12); opacity: 1; }
+  to   { transform: scale(1); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .complete-tick { animation: none; }
+}

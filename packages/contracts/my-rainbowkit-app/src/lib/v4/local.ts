@@ -45,6 +45,22 @@ export function rememberTradeTerms(tradeId: bigint, terms: TradeTerms) {
   set(`escrowx:terms:${scope}:${tradeId}`, JSON.stringify(terms));
 }
 
+/**
+ * The transaction that opened a trade.
+ *
+ * Between `takeOffer` landing and the log index catching up there is a window — around fifteen seconds on
+ * Base — where the app knows a trade exists but can read nothing about it. Keeping the hash means that
+ * window can show the transaction instead of an apology.
+ */
+export function rememberTradeTx(tradeId: bigint, hash: string) {
+  set(`escrowx:tx:${scope}:${tradeId}`, hash);
+}
+
+export function recallTradeTx(tradeId: bigint): string | null {
+  const h = get(`escrowx:tx:${scope}:${tradeId}`);
+  return h && /^0x[0-9a-fA-F]{64}$/.test(h) ? h : null;
+}
+
 export function recallTradeTerms(tradeId: bigint): TradeTerms | null {
   try {
     const t = JSON.parse(get(`escrowx:terms:${scope}:${tradeId}`) ?? "null") as TradeTerms | null;

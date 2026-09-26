@@ -82,11 +82,25 @@ export function CreateOfferForm({ initialSide = "sell", onPublished }: { initial
   const total = parseTokenInput(f.total);
   const priceOk = /^\d+(\.\d+)?$/.test(f.price.trim()) && Number(f.price) > 0;
 
-  // Seed the total from what is actually in the vault, once, before the person has touched the field.
+  // Seed the total from what is actually in the vault, once, before the person has touched the field — and
+  // bring the per-trade cap down with it. The contract wants min <= max <= total, so seeding a 100 total
+  // under a 500 default cap opens the form already invalid, Publish greyed out and nothing saying why.
   useEffect(() => {
     if (!selling || vault.data === undefined || edited.current.has("total")) return;
-    setF((s) => ({ ...s, total: fmtToken(vault.data) }));
+    const seeded = fmtToken(vault.data);
+    const seededRaw = vault.data;
+    setF((s) => {
+      const currentMax = parseTokenInput(s.max);
+      const capTooBig = !edited.current.has("max") && !!currentMax && currentMax > seededRaw;
+      return { ...s, total: seeded, max: capTooBig ? seeded : s.max };
+    });
   }, [selling, vault.data]);
+
+  // Same rule when the total is typed rather than seeded: an untouched cap follows it down.
+  useEffect(() => {
+    if (edited.current.has("max") || !total || !max || max <= total) return;
+    setF((s) => ({ ...s, max: fmtToken(total) }));
+  }, [total, max]);
 
   const overVault = selling && vault.data !== undefined && !!total && total > vault.data;
   const priceGap = reference.data?.median && priceOk

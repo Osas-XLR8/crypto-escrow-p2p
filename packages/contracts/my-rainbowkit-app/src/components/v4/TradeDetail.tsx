@@ -463,6 +463,25 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
 
           <Progress state={t.state} summary={summary} />
 
+          {/* A finished trade used to just stop: the tracker filled up and nothing said "that worked".
+              Ending on a plain statement of what changed hands is the difference between a screen going
+              quiet and a trade being over. */}
+          {t.state === TradeState.RELEASED && (
+            <div className="complete" role="status">
+              <span className="complete-tick" aria-hidden>✓</span>
+              <div className="stack-xs">
+                <span className="strong">
+                  Trade complete · {fmtToken(t.amount)} {SYM} {isBuyer ? "received" : "released"}
+                </span>
+                <span className="small faint">
+                  {isBuyer
+                    ? "The crypto is in your wallet. Nothing further is needed from you."
+                    : "The buyer has their crypto and your trade is closed. Nothing further is needed from you."}
+                </span>
+              </div>
+            </div>
+          )}
+
           {!isParty && open && <Notice tone="info">You&apos;re viewing someone else&apos;s trade. Only the time-based closing actions are open to you.</Notice>}
 
           {claimable > 0n && (

@@ -7,7 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { useAccount } from "wagmi";
 import type { OfferSide } from "@escrowx/sdk";
-import { SITE_URL, V4 } from "@/config/v4";
+import { CHAIN, SITE_URL, V4, explorerTx } from "@/config/v4";
 import { Button, Card, Notice } from "@/components/ui";
 import { ConnectPrompt, Shell } from "@/components/Shell";
 import { useWalletSession } from "@/hooks/useWalletSession";
@@ -21,6 +21,7 @@ import { GettingStarted } from "@/components/v4/GettingStarted";
 import { useV4Trades, type V4TradesResult } from "@/hooks/useV4Trades";
 import { useTradeAlerts } from "@/hooks/useTradeAlerts";
 import { nextStep } from "@/lib/v4/tradeIndex";
+import { recallTradeTx } from "@/lib/v4/local";
 
 type Tab = "market" | "offers" | "trades";
 const SYM = V4.tokenSymbol;
@@ -191,7 +192,7 @@ function App({ tab, go, selected, selectTrade, trades }: {
           </div>
           <div className="stack">
             {selected !== undefined && !selectedSummary && !trades.isLoading && (
-              <Notice tone="info">Trade #{selected.toString()} isn&apos;t indexed yet — it appears once its transaction is confirmed.</Notice>
+              <ConfirmingTrade id={selected} />
             )}
             {selectedSummary ? (
               <TradeDetail key={selectedSummary.tradeId.toString()} summary={selectedSummary} chainNow={trades.chainNow} arbitrationTimeout={trades.arbitrationTimeout} onChanged={trades.refetch} />
@@ -266,5 +267,43 @@ function Hero() {
         ))}
       </div>
     </div>
+  );
+}
+
+/**
+ * The gap between a trade's transaction landing and the app being able to read it.
+ *
+ * The trade list is built from event logs, and a public RPC serves those a few blocks behind the head — so
+ * for roughly fifteen seconds after taking an offer there is a real trade that the app cannot describe.
+ * "Isn't indexed yet" was accurate and useless: it named our problem rather than telling the person what is
+ * happening to their money. This says the transaction is confirming, and links to it, so they can watch it
+ * land somewhere that does know.
+ */
+function ConfirmingTrade({ id }: { id: bigint }) {
+  const hash = recallTradeTx(id);
+  const link = hash ? explorerTx(hash) : null;
+  return (
+    <Card title={<>Trade <span className="mono">#{id.toString()}</span></>}>
+      <div className="stack-sm">
+        <div className="row" style={{ gap: 10, alignItems: "center" }}>
+          <span className="spinner" aria-hidden />
+          <span className="strong">Confirming on {CHAIN.name}…</span>
+        </div>
+        <p className="small faint" style={{ margin: 0 }}>
+          Your transaction is on the network. This page reads trades from confirmed logs, which run a few
+          blocks behind, so the trade appears here shortly — usually within a few seconds. Nothing is at risk
+          while you wait, and leaving the page is safe.
+        </p>
+        {link && (
+          <a className="btn btn-ghost btn-sm mono" href={link} target="_blank" rel="noreferrer">
+            {hash!.slice(0, 10)}… View on the explorer ↗
+          </a>
+        )}
+        <div className="stack-xs">
+          <div className="skeleton" style={{ width: "45%" }} />
+          <div className="skeleton" style={{ width: "70%" }} />
+        </div>
+      </div>
+    </Card>
   );
 }

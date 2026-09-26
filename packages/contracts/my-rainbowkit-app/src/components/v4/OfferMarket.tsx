@@ -18,12 +18,12 @@ import { Reputation, useReputation } from "@/components/v4/Reputation";
 import { CHAIN_ID, FIAT_CURRENCIES, RELAYS, V4, arbitratorName } from "@/config/v4";
 import { Addr, Button, Card, Chip, Empty, Notice, errorText } from "@/components/ui";
 import { fmtDuration } from "@/lib/format";
-import { fmtFiat, fmtToken, parseTokenInput, rememberTradeTerms, termsFromOffer } from "@/lib/v4/local";
+import { fmtFiat, fmtToken, parseTokenInput, rememberTradeTerms, rememberTradeTx, termsFromOffer } from "@/lib/v4/local";
 
 /** Rejections that mean "someone tried to fake or tamper with an offer" (not just old or for another deployment). */
 /** Below this, a "median" is just one person's opinion. */
 const MIN_FOR_MEDIAN = 3;
-/** A slow relay is not an empty market — see the emptyConfirmed effect below. */
+/** How long the offer list must stop changing before anything is concluded from it — see `settled`. */
 const EMPTY_GRACE_MS = 1500;
 
 const FORGERY = new Set(["bad_nostr_signature", "malformed_content", "terms_mismatch", "bad_offer_signature", "bad_binding", "binding_mismatch", "tag_mismatch"]);
@@ -114,19 +114,21 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
   // A price means nothing on its own: 1,592 NGN is a bargain or a rip-off depending on what everyone else is
   // asking. The median of the live offers on this side is the most honest reference available without
   // trusting a price feed — it's the same data on screen, and it can't be moved by one outlier.
-  // "Nobody is selling tUSDT for NGN" is a strong claim, and book.fetch() cannot support it on its own: it
-  // resolves once the relays it reached have answered, and a straggler can still deliver offers over the
-  // subscription a moment later. Declaring the market empty the instant a fetch comes back with nothing is
-  // why switching currency flashed that message on a market that had offers. Give the stragglers a beat.
-  const [emptyConfirmed, setEmptyConfirmed] = useState(false);
+  // Has the list stopped moving? Every claim this component makes about the market — that it is empty, that
+  // there are too few offers to take a median — is a claim about all the offers, and book.fetch() only
+  // resolves for the relays it reached. A straggler can still deliver over the subscription a moment later,
+  // so anything read off a still-growing list is liable to be wrong and then correct itself on screen.
+  const [settled, setSettled] = useState(false);
+  // A new market starts unsettled; nothing carries over from the last one.
+  useEffect(() => setSettled(false), [query]);
   useEffect(() => {
-    if (!loaded || loading || shown.length > 0) {
-      setEmptyConfirmed(false);
-      return;
-    }
-    const t = setTimeout(() => setEmptyConfirmed(true), EMPTY_GRACE_MS);
+    if (!loaded || settled) return;
+    // Restarts whenever another offer lands, so the list has to stop growing before anything is read off it.
+    // Deliberately not keyed on `loading`: the relay subscription re-runs the fetch on every event it sees,
+    // so a chatty relay would keep flipping that flag and the bar would hold its skeleton forever.
+    const t = setTimeout(() => setSettled(true), EMPTY_GRACE_MS);
     return () => clearTimeout(t);
-  }, [loaded, loading, shown.length]);
+  }, [loaded, settled, shown.length, query]);
 
   const prices = shown.map((o) => Number(o.terms.price)).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
   const median = prices.length >= MIN_FOR_MEDIAN
@@ -141,14 +143,14 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
           {forged > 0 && <Notice tone="warn">{forged} offer{forged === 1 ? "" : "s"} failed signature checks and {forged === 1 ? "was" : "were"} hidden.</Notice>}
         </div>
       )}
-      {(!loaded || (shown.length === 0 && !emptyConfirmed && !relayError)) && (
+      {(!loaded || (shown.length === 0 && !settled && !relayError)) && (
         <div className="stack-sm" style={{ padding: 18 }}>
           <div className="skeleton" style={{ width: "40%" }} />
           <div className="skeleton" style={{ width: "75%" }} />
           <div className="skeleton" style={{ width: "60%" }} />
         </div>
       )}
-      {loaded && emptyConfirmed && shown.length === 0 && !relayError && (
+      {loaded && settled && shown.length === 0 && !relayError && (
         mode === "mine" ? (
           <Empty title="No offers yet">Post one below — to sell crypto, or to buy it.</Empty>
         ) : (
@@ -172,7 +174,15 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
       )}
       {/* Say why the bar is missing. Seeing a median on one tab and nothing on the other reads as a bug,
           when it is the threshold doing its job: a "median" of two offers is just somebody's price. */}
-      {mode === "market" && median === undefined && prices.length > 0 && (
+      {mode === "market" && median === undefined && prices.length > 0 && !settled && (
+        <div className="row-between small" style={{ padding: "12px 18px", borderBottom: "1px solid var(--border)" }}>
+          <span className="faint">
+            Market median · {intent === "buy" ? "asks" : "bids"} on {SYM}/{currency}
+          </span>
+          <span className="skeleton" style={{ width: 130, height: 14, display: "inline-block" }} aria-label="Reading the market median" />
+        </div>
+      )}
+      {mode === "market" && median === undefined && prices.length > 0 && settled && (
         <div className="row-between small" style={{ padding: "12px 18px", borderBottom: "1px solid var(--border)" }}>
           <span className="faint">
             Market median · {intent === "buy" ? "asks" : "bids"} on {SYM}/{currency}
@@ -277,7 +287,11 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
   const amountProblem = !amount.trim() || amountOk
     ? null
     : !parsed
-      ? "Enter an amount in numbers"
+      // parseTokenInput rejects anything that isn't a positive decimal, so "-10" and "abc" arrive here
+      // together. They are different mistakes and deserve different answers.
+      ? Number(amount) <= 0 && Number.isFinite(Number(amount))
+        ? "Amount must be greater than 0"
+        : "Enter an amount in numbers"
       : parsed < o.minAmount
         ? `Minimum is ${fmtToken(o.minAmount)} ${terms.tokenSymbol} per trade`
         : parsed > cap
@@ -317,6 +331,13 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
     const before = identity ? 0 : 1;
     const total = plan.length;
     await pending.run("take", async (ctx) => {
+      // Hold on to the transaction that opens the trade: the trade list is built from logs, which lag the
+      // transaction by a few blocks, and during that gap this hash is the only thing that can be shown.
+      let openedBy: string | undefined;
+      const stopWatching = client.onActivity((a) => {
+        if (a.functionName === "takeOffer" && "hash" in a) openedBy = a.hash;
+      });
+      try {
       if (!identity) {
         // Needed for the private chat (payment details); do it first so nobody is stuck mid-trade.
         ctx.step({ index: 1, total, label: plan[0]! });
@@ -327,7 +348,11 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
       const tradeId = await client.takeOffer(o, offer.signature, parsed, {
         onStep: (step) => ctx.step({ index: before + step.index, total, label: step.label }),
       });
+      if (openedBy) rememberTradeTx(tradeId, openedBy);
       onTaken(tradeId);
+      } finally {
+        stopWatching();
+      }
     });
   }
 
