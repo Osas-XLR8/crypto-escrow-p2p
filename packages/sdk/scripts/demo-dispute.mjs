@@ -11,6 +11,7 @@
 //   PRIVATE_KEY=0x… node scripts/demo-dispute.mjs          # Base Sepolia, minutes end to end
 //   … --stop-at fee-pending                                # park a trade in one state to look at the UI
 //   … --contested                                          # both sides file evidence, not just the buyer
+//   … --firm fallback                                       # the case goes to the fallback firm and its panel
 //   … --seller seller-3 --buyer buyer-3                     # run it between named demo wallets
 //   … --opener buyer --warp                                # the buyer opens the dispute (needs the release
 //                                                            window to pass, so local chains only)
@@ -153,7 +154,11 @@ async function topUp(account, label, needsFee = false) {
 // market maker is how that maker ends up with a dispute on its record, which is the whole point of showing one.
 const seller = derived(arg("seller", "dispute-seller"));
 const buyer = derived(arg("buyer", "dispute-buyer"));
-const panelist = derived("panelist");
+// Which firm hears the case. The fallback firm can be named as an offer's primary arbitrator like any other,
+// which is how it gets a real case to decide without waiting out the escrow's escalation timeout first.
+const FIRM = arg("firm", "primary");
+if (!["primary", "fallback"].includes(FIRM)) throw new Error("--firm must be primary or fallback");
+const panelist = derived(FIRM === "fallback" ? "panelist-b" : "panelist");
 const sellerClient = new EscrowV4Client(publicClient, d.escrow, walletFor(seller));
 const buyerClient = new EscrowV4Client(publicClient, d.escrow, walletFor(buyer));
 // The client reports every transaction it sends, which is exactly the list this run needs to keep.
@@ -162,7 +167,8 @@ for (const [who, client] of [["seller", sellerClient], ["buyer", buyerClient]]) 
     if (e.phase === "sent") note(`${who}: ${e.functionName}`, e.hash);
   });
 }
-const firm = d.primaryArbitrator;
+const firm = FIRM === "fallback" ? d.fallbackArbitrator : d.primaryArbitrator;
+const otherFirm = FIRM === "fallback" ? d.primaryArbitrator : d.fallbackArbitrator;
 
 console.log(`Chain ${CHAIN_ID} · escrow ${d.escrow} · firm ${firm}`);
 await topUp(seller, "seller  ", true);
@@ -209,7 +215,7 @@ const offer = createOffer({
   paymentWindow: 600n, // the contract's own minimum
   releaseWindow: 1800n,
   arbitrator: firm,
-  fallbackArbitrator: d.fallbackArbitrator,
+  fallbackArbitrator: otherFirm,
   terms: {
     chainId: CHAIN_ID,
     escrow: d.escrow,

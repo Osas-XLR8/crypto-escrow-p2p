@@ -97,6 +97,33 @@ settles — four transactions, no involvement from the firm that went quiet.
 
 ---
 
+## Trade #47 — the fallback firm decides a case of its own (its case #1)
+
+Firm B had never heard anything, which made "there is a fallback" a claim about a contract rather than about
+people. It doesn't take an escalation to fix that: a firm can be named as an offer's primary arbitrator like
+any other, so this dispute went straight to Firm B and **its own panelist** — `0x1A2035f9B6c96864fC54c5b947418296C42C2550`,
+who serves on Firm B and not on Firm A. Contested, both sides filed, **78 seconds**.
+
+| At | What | Transaction |
+|---|---|---|
+| 26s | buyer: take the offer — 20 tUSDT locked | [`0x7fc7c2…`](https://base-sepolia.blockscout.com/tx/0x7fc7c289120b3d1e34f40b9fd28a4723d10d970dcb43311c37c2e8d54a754e03) |
+| 31s | buyer: mark paid | [`0x2450cf…`](https://base-sepolia.blockscout.com/tx/0x2450cf40e5bf98a6243017a61734f192a45c7e80505cfa0073ddce1ffecd205d) |
+| 36s | seller: open a dispute with **firm B** | [`0x0fcbe5…`](https://base-sepolia.blockscout.com/tx/0x0fcbe5edc057ff839bc676977968b1d09ce742e406c6f85f7a13d33ffefd824f) |
+| 41s | buyer: match the fee — firm B's case #1 | [`0x583b32…`](https://base-sepolia.blockscout.com/tx/0x583b328beda284cbef935c9daf52af9e2a2450c585a137322e6e91994d63d1cf) |
+| 45s | firm B: assign **its own** panelist | [`0x890276…`](https://base-sepolia.blockscout.com/tx/0x8902766f58554195da63f511b5ec86bc0feb6d7a2248312932c875be65987d5f) |
+| 48s | buyer: file evidence | [`0xf3ba16…`](https://base-sepolia.blockscout.com/tx/0xf3ba1651b2da0a8aac307c7d8edb8f8859eb1ff1ea76fefa6cd12fe1b126d17e) |
+| 53s | seller: file evidence | [`0x0ca945…`](https://base-sepolia.blockscout.com/tx/0x0ca945db0c201ede3b014d20db0b9d685a6ac0d7c5a308b763c6121dfe028f18) |
+| 70s | firm B's panelist: propose a ruling | [`0x1b5f53…`](https://base-sepolia.blockscout.com/tx/0x1b5f536117d0c8cf295caaa2cfd8e79a668cb506841cd3eda5ed87bc3cfd9912) |
+| 74s | firm B: confirm and execute | [`0xe13384…`](https://base-sepolia.blockscout.com/tx/0xe1338441dd15cb513fe59c72aecd09f5dcc480e00cf575c9113099064cb29675) |
+
+This is not the escalation path — that still waits out the escrow's seven-day timeout on trade #4. It is the
+half of the fallback guarantee that can be proven without a clock: firm B has a panel, that panel can be
+assigned, and it can rule.
+
+Reproduce it: `npm run demo:dispute -- --contested --firm fallback`.
+
+---
+
 ## Also on this deployment
 
 | Trade | Case | What it shows |
