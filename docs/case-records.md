@@ -61,22 +61,35 @@ Reproduce it: `npm run demo:dispute -- --contested` (from `packages/sdk`).
 
 ---
 
-## Trade #3 — fee forfeit: the other side never paid · *window closes 26 Sep 2026, 06:54 UTC*
+## Trade #3 — fee forfeit: the other side never paid, and lost
 
-A dispute where the counterparty simply doesn't match the arbitration fee. After the escrow's fee window
-(24 hours — the contract's own minimum, unshortenable), anyone can settle it in the opener's favour.
+A dispute where the counterparty simply doesn't match the arbitration fee. The escrow's fee window is 24 hours
+— the contract's own minimum, unshortenable — and once it closes, **anyone** can settle the trade in the
+opener's favour.
 
-Opened 25 Sep 2026. Trade #3 is sitting in `FEE_PENDING` on Base Sepolia right now; the desk and the app both
-show the countdown. Finish it with:
+Opened 25 Sep 2026, 06:54 UTC. The window closed 26 Sep 2026 at 06:54 UTC and the trade was settled 98 seconds
+later. Readable on the desk as *Trade #3 · CANCELLED*.
 
-```
-node scripts/finish-timeout.mjs --trade 3
-```
+| At | What | Transaction |
+|---|---|---|
+| +24h 2m | settle by default — nobody's permission needed | [`0x261d5d…`](https://base-sepolia.blockscout.com/tx/0x261d5db6929fb06fb42b8ca3711ba8d934ca9429ba4f7771001997f240d39a3a) |
+
+What the chain says afterwards: trade #3 is `CANCELLED` with reason `FEE_DEFAULT`, the seller's 20 tUSDT is
+back in their vault balance, and their 0.0005 ETH fee is credited back to them as claimable. The buyer, who
+opened nothing and paid nothing, gets nothing back — that is the whole point of the window.
+
+Two details worth reading off this one transaction:
+
+- **A third party sent it.** Not the buyer, not the seller — the deployer key, which is party to neither side
+  of this trade. The refund still went to the opener. A stalemate cannot be used to strand someone's money,
+  because it doesn't take either party's cooperation to end it.
+- **Refunds are credited, not pushed.** The fee lands in `claimableNative` and the tokens in the vault's free
+  balance, both withdrawn in a separate transaction of the party's choosing. So settling can never fail
+  because a recipient refuses to receive.
 
 The same path, proven end to end on a local chain where the clock can be moved:
 `node scripts/demo-dispute.mjs --chain 31337 --stop-at fee-pending` then
-`node scripts/finish-timeout.mjs --chain 31337 --trade <id> --warp` → trade CANCELLED, opener's fee refunded,
-the side that walked away lost by default.
+`node scripts/finish-timeout.mjs --chain 31337 --trade <id> --warp`.
 
 ---
 
