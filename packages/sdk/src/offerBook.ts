@@ -32,6 +32,9 @@ export interface PublishResult {
 
 export class OfferBook {
   readonly pool: SimplePool;
+  /** eventId → the verdict we already reached for it. Bounded; oldest entries drop first. */
+  private readonly verified = new Map<string, { offer: ParsedOffer } | { error: unknown }>();
+  private static readonly MAX_VERIFIED = 500;
 
   constructor(
     readonly relays: string[],
@@ -76,21 +79,51 @@ export class OfferBook {
     const latest = new Map<string, ParsedOffer>();
     const rejected: OfferQueryResult["rejected"] = [];
 
-    for (const event of events) {
-      try {
-        const parsed = await parseOfferEvent(event, { ...this.parseOptions, chainId: q.chainId });
-        const maker = q.maker ?? q.seller;
-        if (maker && parsed.maker.toLowerCase() !== maker.toLowerCase()) continue;
-        if (q.side && parsed.side !== q.side) continue;
-        // Addressable-event semantics: newest event per (author, offer hash) wins.
-        const key = `${event.pubkey}:${parsed.offerHash}`;
-        const prev = latest.get(key);
-        if (!prev || event.created_at > prev.event.created_at) latest.set(key, parsed);
-      } catch (e) {
+    // Verifying every offer before showing any is unavoidable — an unverified offer is not an offer. Doing
+    // it one at a time was not: each event costs two chain round trips (the maker's signature and their
+    // wallet binding, both of which may be contract wallets), so a serial loop turned a market of twenty
+    // offers into forty sequential requests and several seconds of skeletons. They do not depend on each
+    // other, so they all go at once and the wait becomes one round trip rather than 2N.
+    const parsed = await Promise.all(
+      events.map(async (event) => {
+        // A Nostr event is immutable and content-addressed by its id, so whether it verifies is a fact
+        // about the event, not about when we asked. Re-checking one we have already seen costs the same
+        // two chain round trips and can only produce the same answer — so switching currency and back, or
+        // a relay resending what another already sent, is free after the first time.
+        const seen = this.verified.get(event.id);
+        if (seen) return "error" in seen ? { event, error: seen.error } : { event, offer: seen.offer };
+        try {
+          const offer = await parseOfferEvent(event, { ...this.parseOptions, chainId: q.chainId });
+          this.remember(event.id, { offer });
+          return { event, offer };
+        } catch (e) {
+          // Only cache a verdict about the event itself. "Expired" is a verdict about the clock, and
+          // "wrong_network" about the query, and both can differ on the next call with the same event.
+          if (e instanceof OfferEventError && e.reason !== "expired" && e.reason !== "wrong_network") {
+            this.remember(event.id, { error: e });
+          }
+          return { event, error: e };
+        }
+      })
+    );
+
+    // Second pass, in the relays' order, so dedupe and rejection order stay deterministic.
+    for (const r of parsed) {
+      if ("error" in r) {
+        const e = r.error;
         // Offers for another chain or escrow deployment share the protocol tag; they're not ours, not forged.
         if (e instanceof OfferEventError && e.reason === "wrong_network") continue;
-        rejected.push({ eventId: event.id, reason: e instanceof OfferEventError ? e.reason : String((e as Error).message) });
+        rejected.push({ eventId: r.event.id, reason: e instanceof OfferEventError ? e.reason : String((e as Error).message) });
+        continue;
       }
+      const offer = r.offer;
+      const maker = q.maker ?? q.seller;
+      if (maker && offer.maker.toLowerCase() !== maker.toLowerCase()) continue;
+      if (q.side && offer.side !== q.side) continue;
+      // Addressable-event semantics: newest event per (author, offer hash) wins.
+      const key = `${r.event.pubkey}:${offer.offerHash}`;
+      const prev = latest.get(key);
+      if (!prev || r.event.created_at > prev.event.created_at) latest.set(key, offer);
     }
 
     const offers = [...latest.values()].filter((o) => o.status === "pending");
@@ -115,6 +148,14 @@ export class OfferBook {
       },
     });
     return () => sub.close();
+  }
+
+  private remember(id: string, verdict: { offer: ParsedOffer } | { error: unknown }) {
+    if (this.verified.size >= OfferBook.MAX_VERIFIED) {
+      const oldest = this.verified.keys().next().value;
+      if (oldest !== undefined) this.verified.delete(oldest);
+    }
+    this.verified.set(id, verdict);
   }
 
   close(): void {

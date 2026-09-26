@@ -151,13 +151,17 @@ export async function parseOfferEvent(event: Event, opts: ParseOptions = {}): Pr
   if (hashTerms(terms) !== offer.termsHash) fail("terms_mismatch", "published terms do not match the signed termsHash");
 
   const offerHash = hashOffer(offer, terms.chainId, terms.escrow);
-  if (!(await verifyOfferSignature(offer, signature, terms.chainId, terms.escrow, opts.publicClient))) {
-    fail("bad_offer_signature", "offer is not signed by its maker");
-  }
   const side = offerSide(offer);
   const maker = offerMaker(offer);
 
-  if (!(await verifyBinding(binding, opts.publicClient))) fail("bad_binding", "wallet binding signature is invalid");
+  // Both of these may reach the chain (a contract wallet validates its own signatures), and neither depends
+  // on the other's answer — so they wait together rather than one after the other.
+  const [signatureOk, bindingOk] = await Promise.all([
+    verifyOfferSignature(offer, signature, terms.chainId, terms.escrow, opts.publicClient),
+    verifyBinding(binding, opts.publicClient),
+  ]);
+  if (!signatureOk) fail("bad_offer_signature", "offer is not signed by its maker");
+  if (!bindingOk) fail("bad_binding", "wallet binding signature is invalid");
   if (!sameAddress(binding.address, maker) || binding.nostrPubkey !== event.pubkey) {
     fail("binding_mismatch", "this Nostr key is not bound to the offer's maker");
   }

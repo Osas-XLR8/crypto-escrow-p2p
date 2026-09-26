@@ -72,14 +72,32 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
     }
   }, [book, query, mode, address, side]);
 
+  // One verified offer arriving on its own. Merging it beats re-running the whole fetch on every relay
+  // event: the list fills in as relays answer rather than after the slowest one, and a chatty relay no
+  // longer triggers a fresh round of verification for offers already on screen.
+  const merge = useCallback((incoming: ParsedOffer) => {
+    setOffers((prev) => {
+      const key = (o: ParsedOffer) => `${o.event.pubkey}:${o.offerHash}`;
+      const at = prev.findIndex((o) => key(o) === key(incoming));
+      if (at >= 0 && prev[at]!.event.created_at >= incoming.event.created_at) return prev;
+      // A cancelled replacement drops the offer rather than replacing it in place.
+      const without = at >= 0 ? [...prev.slice(0, at), ...prev.slice(at + 1)] : prev;
+      const next = incoming.status === "pending" ? [...without, incoming] : without;
+      // Same order the fetch produces, so an arrival never reshuffles what is already being read.
+      next.sort((a, b) => Number(a.terms.price) - Number(b.terms.price));
+      return mode === "market" && side === "buy" ? next.reverse() : next;
+    });
+    setLoaded(true);
+  }, [mode, side]);
+
   useEffect(() => {
     setLoaded(false);
     setOffers([]);
     void load();
     if (!book) return;
-    // Live updates: new or replaced offers re-run the verified fetch (handles cancellations too).
-    return book.subscribe(query, () => void load());
-  }, [book, query, load]);
+    // Live updates, and the first paint: offers appear as each relay answers.
+    return book.subscribe(query, merge);
+  }, [book, query, load, merge]);
 
   const hashes = offers.map((o) => o.offerHash).join(",");
   const remaining = useQuery({
