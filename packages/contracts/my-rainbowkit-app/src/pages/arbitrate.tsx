@@ -485,6 +485,11 @@ function CaseDetail({ firm, c, trade, panel, isAdmin, now, arbitrationTimeout, o
   const paidCommitment = trade?.events.find((e) => e.name === "PaymentMarked")?.args.evidenceCommitment as Hex | undefined;
   const evidence = (trade?.events ?? []).filter((e) => e.name === "Evidence" && same(e.args.arbitrator as string, firm.address));
   const stage = caseStage(c, firm, now);
+  // The trade page renders the connected wallet's own trades, so /?trade=N is a connect wall for a
+  // visitor and an empty list for anyone who isn't a party. This page promises that cases are readable
+  // without a wallet; a link that breaks that promise is worse than no link, and everything a reader
+  // needs about the trade is already on this card.
+  const viewerIsParty = !!trade && !!address && (same(trade.buyer, address) || same(trade.seller, address));
   const partyLabel = (addr: unknown) =>
     !trade || typeof addr !== "string" ? "" : same(addr, trade.buyer) ? "buyer" : same(addr, trade.seller) ? "seller" : "";
 
@@ -497,7 +502,9 @@ function CaseDetail({ firm, c, trade, panel, isAdmin, now, arbitrationTimeout, o
             <div className="stack-xs">
               <div className="big-num">{fmtToken(trade.amount)} <span className="faint" style={{ fontSize: 14 }}>{V4.tokenSymbol}</span></div>
               <div className="small muted">
-                Trade <Link href={`/?trade=${trade.tradeId}`} className="mono">#{trade.tradeId.toString()}</Link> between buyer <Addr address={trade.buyer} /> and seller <Addr address={trade.seller} />
+                Trade {viewerIsParty
+                  ? <Link href={`/?trade=${trade.tradeId}`} className="mono">#{trade.tradeId.toString()}</Link>
+                  : <span className="mono">#{trade.tradeId.toString()}</span>} between buyer <Addr address={trade.buyer} /> and seller <Addr address={trade.seller} />
               </div>
             </div>
           ) : (
