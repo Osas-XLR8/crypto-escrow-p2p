@@ -160,10 +160,15 @@ seller's first transaction to the ruling executing — block timestamps, not a s
 Afterwards the chain says: trade #48 `RELEASED`, `Ruling(disputeID 7, ruling 1)` from firm A, 20 tUSDT in the
 buyer's wallet and their 0.0005 ETH fee claimable back; the seller's fee paid the firm.
 
-The parties here are two wallets that existed only for this case. That is not decoration: the demo
-counterparty bots serve every wallet the demo market uses, and they release a trade the moment it is marked
-paid — which is the state a dispute has to be opened from. Running this on the usual dispute wallets would
-have raced the bots for the trade. Anyone reproducing it against a live demo should pass their own labels:
+The parties here are two wallets that existed only for this case. That is not decoration. A seller may
+dispute any paid trade, but a buyer may only dispute once the release window has passed — so the dispute
+above had to be opened by the seller, seconds after the buyer marked paid. The demo counterparty bots serve
+every wallet the demo market uses and release a trade within ten seconds of it being marked paid, so running
+this on the usual dispute wallets would have raced them for the trade, and the bots would have won.
+
+That asymmetry is worth reading twice, because it also explains why the bots releasing quickly costs a real
+visitor nothing: a buyer has no dispute to lose during the release window, and release is the outcome they
+wanted. Anyone reproducing this against a live demo should pass their own labels:
 
 ```
 npm run demo:dispute -- --contested --seller my-seller --buyer my-buyer
