@@ -455,3 +455,10 @@ select.input { padding-right: 28px; }
   text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
 }
 .linklike:hover { color: var(--text); }
+
+/* The market's filter bar. Sits above the list, wraps on narrow screens rather than scrolling sideways. */
+.market-filters {
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}

@@ -15,17 +15,18 @@ import { useFirmPanels } from "@/hooks/useFirmPanels";
 import { usePendingAction } from "@/hooks/usePendingAction";
 import { PendingNotice, pendingLabel } from "@/components/v4/Pending";
 import { DisputeWarning, Reputation, useReputation } from "@/components/v4/Reputation";
+import { ESTABLISHED_TRADES, filterOffers, sortOffers, type SortKey } from "@/lib/v4/marketFilters";
 import { CHAIN_ID, FIAT_CURRENCIES, RELAYS, V4, arbitratorName } from "@/config/v4";
 import { Addr, Button, Card, Chip, Empty, Notice, errorText } from "@/components/ui";
 import { fmtDuration } from "@/lib/format";
 import { blockedAddresses, fmtFiat, fmtToken, parseTokenInput, rememberTradeTerms, rememberTradeTx, termsFromOffer } from "@/lib/v4/local";
 
-/** Rejections that mean "someone tried to fake or tamper with an offer" (not just old or for another deployment). */
 /** Below this, a "median" is just one person's opinion. */
 const MIN_FOR_MEDIAN = 3;
 /** How long the offer list must stop changing before anything is concluded from it — see `settled`. */
 const EMPTY_GRACE_MS = 1500;
 
+/** Rejections meaning "someone tried to fake or tamper with an offer", not just old or for another deployment. */
 const FORGERY = new Set(["bad_nostr_signature", "malformed_content", "terms_mismatch", "bad_offer_signature", "bad_binding", "binding_mismatch", "tag_mismatch"]);
 const SYM = V4.tokenSymbol;
 
@@ -143,9 +144,38 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
     return () => channel?.close();
   }, []);
 
+  // ─── Filters and sorting ───────────────────────────────────────────────────
+  //
+  // A market is only browsable if you can ask it your own question. The questions people actually arrive
+  // with are "can this offer fill ₦50,000?", "does it take Opay?" and "is this someone established?" — so
+  // those are the three filters, and they operate on data already on screen rather than a search service.
+  const reputationOf = useReputation();
+  const [wantFiat, setWantFiat] = useState("");
+  const [methodFilter, setMethodFilter] = useState<string[]>([]);
+  const [establishedOnly, setEstablishedOnly] = useState(false);
+  const [sortBy, setSortBy] = useState<SortKey>("price");
+
   const visible = mode === "mine" ? offers : live;
   const hidden = mode === "mine" ? 0 : visible.filter((o) => blocked.includes(o.maker.toLowerCase())).length;
-  const shown = mode === "mine" ? offers : visible.filter((o) => !blocked.includes(o.maker.toLowerCase()));
+  const unblocked = mode === "mine" ? offers : visible.filter((o) => !blocked.includes(o.maker.toLowerCase()));
+
+  // Every payment method anybody on this side of this market accepts, for the filter's options.
+  const allMethods = useMemo(
+    () => [...new Set(unblocked.flatMap((o) => o.terms.paymentMethods))].sort(),
+    [unblocked]
+  );
+
+  const filtered = mode === "mine"
+    ? unblocked
+    : filterOffers(unblocked, { wantFiat, methods: methodFilter, establishedOnly }, {
+        tokenDecimals: V4.tokenDecimals,
+        remainingOf: (o) => remaining.data?.[o.offerHash],
+        statsOf: (a) => reputationOf(a),
+      });
+
+  // Buyers browse asks and want the lowest; sellers browse bids and want the highest.
+  const shown = mode === "mine" ? filtered : sortOffers(filtered, sortBy, intent === "buy", (a) => reputationOf(a));
+  const filteredOut = unblocked.length - filtered.length;
 
   // A price means nothing on its own: 1,592 NGN is a bargain or a rip-off depending on what everyone else is
   // asking. The median of the live offers on this side is the most honest reference available without
@@ -197,6 +227,64 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
             Post your own offer and it appears here the moment it&apos;s signed.
           </Empty>
         )
+      )}
+      {mode === "market" && (
+        <div className="market-filters">
+          <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <label className="tiny faint" htmlFor="want-amount">I want</label>
+            <div className="input-affix" style={{ maxWidth: 190 }}>
+              <input
+                id="want-amount"
+                className="input mono"
+                value={wantFiat}
+                onChange={(e) => setWantFiat(e.target.value)}
+                placeholder="any amount"
+                inputMode="decimal"
+                aria-label={`Amount of ${currency} you want to trade`}
+              />
+              <span className="affix">{currency}</span>
+            </div>
+            {allMethods.length > 0 && (
+              <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                {allMethods.map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    className={`chip ${methodFilter.includes(m) ? "chip-accent" : ""}`}
+                    aria-pressed={methodFilter.includes(m)}
+                    onClick={() => setMethodFilter((prev) => (prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m]))}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
+            )}
+            <button
+              type="button"
+              className={`chip ${establishedOnly ? "chip-accent" : ""}`}
+              aria-pressed={establishedOnly}
+              title={`Only traders with ${ESTABLISHED_TRADES} or more trades on this escrow.`}
+              onClick={() => setEstablishedOnly((v) => !v)}
+            >
+              {ESTABLISHED_TRADES}+ trades only
+            </button>
+            <span style={{ flex: 1 }} />
+            <label className="tiny faint" htmlFor="sort-by">Sort by</label>
+            <select id="sort-by" className="input" style={{ width: "auto" }} value={sortBy} onChange={(e) => setSortBy(e.target.value as SortKey)} aria-label="Sort offers by">
+              <option value="price">Best price</option>
+              <option value="completion">Completion rate</option>
+              <option value="release">Fastest release</option>
+            </select>
+          </div>
+          {filteredOut > 0 && (
+            <div className="tiny faint" style={{ marginTop: 8 }}>
+              {filteredOut} offer{filteredOut === 1 ? "" : "s"} don&apos;t match these filters.{" "}
+              <button type="button" className="linklike" onClick={() => { setWantFiat(""); setMethodFilter([]); setEstablishedOnly(false); }}>
+                Clear filters
+              </button>
+            </div>
+          )}
+        </div>
       )}
       {hidden > 0 && (
         <div className="small faint" style={{ padding: "10px 18px", borderBottom: "1px solid var(--border)" }}>
