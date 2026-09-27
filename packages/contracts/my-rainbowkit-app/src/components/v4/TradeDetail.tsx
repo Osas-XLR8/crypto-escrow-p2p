@@ -23,6 +23,7 @@ import { useFirmPanels } from "@/hooks/useFirmPanels";
 import { usePendingAction } from "@/hooks/usePendingAction";
 import { PendingNotice, pendingLabel } from "@/components/v4/Pending";
 import { DisputeWarning, Reputation, useReputation } from "@/components/v4/Reputation";
+import { RatePrompt } from "@/components/v4/RatePrompt";
 import { V4, arbitratorName } from "@/config/v4";
 import { StateBadge } from "@/components/StateBadge";
 import { Addr, Button, Card, Field, KV, Notice, TxLink, errorText } from "@/components/ui";
@@ -31,7 +32,7 @@ import { TradeChatPanel } from "@/components/v4/TradeChatPanel";
 import { fmtDuration, fmtTs, shortAddr, shortHash } from "@/lib/format";
 import { useMessages } from "@/context/Messages";
 import { describeEvent } from "@/lib/v4/describe";
-import { downloadBytes, findTradeOffer, fmtFiat, fmtToken, loadEvidence, recallTradeTerms, rememberTradeTerms, storeEvidence, termsFromOffer } from "@/lib/v4/local";
+import { downloadBytes, findTradeOffer, fmtFiat, fmtToken, isBlocked, loadEvidence, recallTradeTerms, rememberTradeTerms, setBlocked, storeEvidence, termsFromOffer } from "@/lib/v4/local";
 import { V4State, progressSteps, type TradeSummary } from "@/lib/v4/tradeIndex";
 
 const SYM = V4.tokenSymbol;
@@ -460,6 +461,7 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
             <div className="small muted row" style={{ gap: 6 }}>{roleLine}</div>
             {counterparty && <Reputation stats={reputationOf(counterparty)} address={counterparty} detailed />}
             {counterparty && open && <DisputeWarning stats={reputationOf(counterparty)} />}
+            {counterparty && isParty && <BlockToggle address={counterparty} />}
           </div>
 
           <Progress state={t.state} summary={summary} />
@@ -479,6 +481,11 @@ export function TradeDetail({ summary, chainNow, arbitrationTimeout, onChanged }
                     ? "The crypto is in your wallet. Nothing further is needed from you."
                     : "The buyer has their crypto and your trade is closed. Nothing further is needed from you."}
                 </span>
+                {isParty && counterparty && (
+                  <div style={{ marginTop: 10 }}>
+                    <RatePrompt tradeId={id} counterparty={counterparty} counterpartyWasSeller={isBuyer} />
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -665,5 +672,35 @@ function Timeline({ summary }: { summary: TradeSummary }) {
         ))}
       </ol>
     </Card>
+  );
+}
+
+/**
+ * Block someone, from the screen where you found out you wanted to.
+ *
+ * Says exactly what it does. A block hides their offers from your market; it cannot stop them taking your
+ * offers, because an offer is a signed message on public relays that the escrow will honour from anyone
+ * meeting its terms. Claiming otherwise would be the kind of safety promise that gets someone hurt.
+ */
+function BlockToggle({ address }: { address: Address }) {
+  const [blocked, setBlockedState] = useState(() => isBlocked(address));
+  return (
+    <div className="row" style={{ gap: 8, alignItems: "center" }}>
+      <button
+        type="button"
+        className="linklike tiny"
+        onClick={() => {
+          setBlocked(address, !blocked);
+          setBlockedState(!blocked);
+        }}
+      >
+        {blocked ? "Unblock this trader" : "Block this trader"}
+      </button>
+      <span className="tiny faint">
+        {blocked
+          ? "Their offers are hidden from your market. They can still take offers you post — an offer is public and the escrow honours it from anyone."
+          : "Hides their offers from your market on this device."}
+      </span>
+    </div>
   );
 }

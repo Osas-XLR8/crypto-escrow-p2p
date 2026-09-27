@@ -18,7 +18,7 @@ import { DisputeWarning, Reputation, useReputation } from "@/components/v4/Reput
 import { CHAIN_ID, FIAT_CURRENCIES, RELAYS, V4, arbitratorName } from "@/config/v4";
 import { Addr, Button, Card, Chip, Empty, Notice, errorText } from "@/components/ui";
 import { fmtDuration } from "@/lib/format";
-import { fmtFiat, fmtToken, parseTokenInput, rememberTradeTerms, rememberTradeTx, termsFromOffer } from "@/lib/v4/local";
+import { blockedAddresses, fmtFiat, fmtToken, parseTokenInput, rememberTradeTerms, rememberTradeTx, termsFromOffer } from "@/lib/v4/local";
 
 /** Rejections that mean "someone tried to fake or tamper with an offer" (not just old or for another deployment). */
 /** Below this, a "median" is just one person's opinion. */
@@ -127,7 +127,25 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
     const r = remaining.data?.[o.offerHash];
     return Number(o.offer.expiry) > now && (r === undefined || r >= o.offer.minAmount);
   });
-  const shown = mode === "mine" ? offers : live;
+  // A block is a personal filter: their offers leave your market. It cannot stop them taking yours — an
+  // offer is a signed message anyone may act on, which is the same property that lets you trade without
+  // asking permission — so the app says so rather than implying a protection it does not have.
+  const [blocked, setBlocked] = useState<string[]>([]);
+  useEffect(() => {
+    setBlocked(blockedAddresses());
+    let channel: BroadcastChannel | null = null;
+    try {
+      channel = new BroadcastChannel("escrowx:blocked");
+      channel.onmessage = (e) => setBlocked(Array.isArray(e.data) ? (e.data as string[]) : blockedAddresses());
+    } catch {
+      /* no BroadcastChannel here; this tab keeps its own view */
+    }
+    return () => channel?.close();
+  }, []);
+
+  const visible = mode === "mine" ? offers : live;
+  const hidden = mode === "mine" ? 0 : visible.filter((o) => blocked.includes(o.maker.toLowerCase())).length;
+  const shown = mode === "mine" ? offers : visible.filter((o) => !blocked.includes(o.maker.toLowerCase()));
 
   // A price means nothing on its own: 1,592 NGN is a bargain or a rip-off depending on what everyone else is
   // asking. The median of the live offers on this side is the most honest reference available without
@@ -179,6 +197,12 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
             Post your own offer and it appears here the moment it&apos;s signed.
           </Empty>
         )
+      )}
+      {hidden > 0 && (
+        <div className="small faint" style={{ padding: "10px 18px", borderBottom: "1px solid var(--border)" }}>
+          {hidden} offer{hidden === 1 ? "" : "s"} hidden from traders you blocked.{" "}
+          <button type="button" className="linklike" onClick={() => setBlocked([])}>Show them for now</button>
+        </div>
       )}
       {mode === "market" && median !== undefined && (
         <div className="row-between small" style={{ padding: "12px 18px", borderBottom: "1px solid var(--border)" }}>

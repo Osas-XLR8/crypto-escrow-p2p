@@ -177,3 +177,59 @@ export function fmtFiat(raw: bigint, price: string, currency: string): string {
     return `${value.toFixed(2)} ${currency}`;
   }
 }
+
+// ─── Blocked counterparties ───────────────────────────────────────────────────
+//
+// A personal list, kept on this device. It hides someone's offers from you and warns you before you deal
+// with them again.
+//
+// What it cannot do is stop them taking *your* offers. An offer is a signed message on public relays and
+// the escrow accepts it from anyone who meets its terms — that is the property that makes this market
+// permissionless, and it cuts both ways. Enforcing a block on the taking side would mean a deny-list in
+// the contract, which is a different product and a much worse one. So the app says plainly what a block
+// does rather than implying a protection it cannot give.
+
+const BLOCKED_KEY = `escrowx:blocked:${scope}`;
+
+export function blockedAddresses(): string[] {
+  try {
+    const raw = JSON.parse(get(BLOCKED_KEY) ?? "[]") as unknown;
+    return Array.isArray(raw) ? raw.filter((a): a is string => typeof a === "string").map((a) => a.toLowerCase()) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function isBlocked(address?: string): boolean {
+  return !!address && blockedAddresses().includes(address.toLowerCase());
+}
+
+/** Returns the list as it now stands, so callers can update state without re-reading. */
+export function setBlocked(address: string, blocked: boolean): string[] {
+  const lower = address.toLowerCase();
+  const next = blocked
+    ? [...new Set([...blockedAddresses(), lower])]
+    : blockedAddresses().filter((a) => a !== lower);
+  set(BLOCKED_KEY, JSON.stringify(next));
+  // Other tabs of the same app should agree about who is blocked.
+  try {
+    new BroadcastChannel("escrowx:blocked").postMessage(next);
+  } catch {
+    /* no BroadcastChannel: the other tab catches up on its next load */
+  }
+  return next;
+}
+
+// ─── Ratings you have already given ───────────────────────────────────────────
+//
+// Only so the prompt doesn't ask twice on this device. The rating itself lives on the relays; this is a
+// convenience, and losing it costs nothing worse than being asked again.
+
+export function rememberRatingGiven(tradeId: bigint, score: 1 | -1) {
+  set(`escrowx:rated:${scope}:${tradeId}`, String(score));
+}
+
+export function recallRatingGiven(tradeId: bigint): 1 | -1 | null {
+  const v = get(`escrowx:rated:${scope}:${tradeId}`);
+  return v === "1" ? 1 : v === "-1" ? -1 : null;
+}

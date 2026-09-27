@@ -448,3 +448,10 @@ select.input { padding-right: 28px; }
 @media (prefers-reduced-motion: reduce) {
   .complete-tick { animation: none; }
 }
+
+/* An inline control that reads as prose rather than a button, for asides like "show them for now". */
+.linklike {
+  background: none; border: 0; padding: 0; font: inherit; color: var(--accent);
+  text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+}
+.linklike:hover { color: var(--text); }

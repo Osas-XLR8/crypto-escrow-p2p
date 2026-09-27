@@ -11,6 +11,7 @@ import { CHAIN } from "@/config/v4";
 import { useV4Trades } from "@/hooks/useV4Trades";
 import { buildReputation, completionRate, confidence, disputeAlarm, disputeRate, releaseTime, settled, statsFor, type PartyStats } from "@/lib/v4/reputation";
 import { Chip, Notice } from "@/components/ui";
+import { useRatingsFor } from "@/hooks/useRatings";
 import { fmtDuration } from "@/lib/format";
 
 /** Shared through react-query's cache with the trades list, so this costs no extra requests. */
@@ -41,6 +42,10 @@ const day = (ts: number) => new Date(ts * 1000).toLocaleDateString(undefined, { 
  */
 export function Reputation({ stats, address, detailed = false }: { stats?: PartyStats; address?: Address; detailed?: boolean }) {
   const activity = useWalletActivity(detailed ? address : undefined);
+  // Each rating costs a chain read to check its trade, so this is for a counterparty you are looking at on
+  // purpose — not for every card in a market list.
+  const ratings = useRatingsFor(detailed ? address : undefined);
+  const said = ratings.data?.summary;
   const done = stats ? settled(stats) : 0;
   const rate = stats && completionRate(stats);
   const disputes = stats && disputeRate(stats);
@@ -101,6 +106,14 @@ export function Reputation({ stats, address, detailed = false }: { stats?: Party
           since {month(stats.firstSeen)}
           {trust === "thin" && " · thin history"}
         </span>
+      )}
+      {said && said.total > 0 && (
+        <Chip
+          tone={said.rate !== undefined && said.rate >= 0.8 ? "accent" : said.rate !== undefined && said.rate < 0.5 ? "warn" : undefined}
+          title={`${said.positive} of ${said.total} counterparties who traded with them rated it positively${said.tags.length ? `. Most mentioned: ${said.tags.slice(0, 2).map((t) => t.tag).join(", ")}` : ""}.`}
+        >
+          {pct(said.rate ?? 0)} rated good <span className="faint">· {said.total}</span>
+        </Chip>
       )}
       {detailed && activity.data !== undefined && (
         <span className="faint">· {activity.data} transaction{activity.data === 1 ? "" : "s"} on {CHAIN.name}</span>
