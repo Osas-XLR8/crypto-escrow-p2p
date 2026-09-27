@@ -19,9 +19,17 @@ const isReplaceable = (k) => k === 0 || k === 3 || (k >= 10000 && k < 20000);
 const isAddressable = (k) => k >= 30000 && k < 40000;
 const dTag = (e) => e.tags.find((t) => t[0] === "d")?.[1] ?? "";
 
+// NIP-01 reserves "e" and "p" for 32-byte hex ids and pubkeys, and real relays reject anything else with
+// "unexpected size for fixed-size tag". This relay used to accept them, which is how a rating event with an
+// Ethereum address in "p" passed every local test and then failed against every relay in production. A
+// permissive development relay is not a convenience; it is a way to find out late.
+const FIXED_SIZE_TAGS = new Set(["e", "p"]);
+const tagsWellFormed = (e) =>
+  e.tags.every((t) => !FIXED_SIZE_TAGS.has(t[0]) || (typeof t[1] === "string" && /^[0-9a-f]{64}$/.test(t[1])));
+
 // Rebuild from NIP-01 fields so a cached "verified" flag on the object can never skip the check.
 const verifyStrict = (e) =>
-  !!e && Array.isArray(e.tags) &&
+  !!e && Array.isArray(e.tags) && tagsWellFormed(e) &&
   verifyEvent({ id: e.id, pubkey: e.pubkey, created_at: e.created_at, kind: e.kind, tags: e.tags, content: e.content, sig: e.sig });
 
 function store(e) {
@@ -53,7 +61,9 @@ wss.on("connection", (ws) => {
     const [type, ...rest] = msg;
     if (type === "EVENT") {
       const e = rest[0];
-      if (!verifyStrict(e)) return send(ws, ["OK", e?.id, false, "invalid: bad signature"]);
+      if (!e || !Array.isArray(e.tags)) return send(ws, ["OK", e?.id, false, "invalid: malformed event"]);
+      if (!tagsWellFormed(e)) return send(ws, ["OK", e.id, false, "invalid: unexpected size for fixed-size tag"]);
+      if (!verifyStrict(e)) return send(ws, ["OK", e.id, false, "invalid: bad signature"]);
       if (!events.some((x) => x.id === e.id)) store(e);
       send(ws, ["OK", e.id, true, ""]);
       for (const [client, clientSubs] of subs) for (const [id, filters] of clientSubs) if (matchFilters(filters, e)) send(client, ["EVENT", id, e]);

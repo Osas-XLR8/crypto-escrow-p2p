@@ -102,9 +102,12 @@ export function buildRatingEvent(args: {
       created_at: args.createdAt ?? Math.floor(Date.now() / 1000),
       tags: [
         ["d", ratingAddress(rating.chainId, rating.escrow, rating.tradeId, rating.rater)],
-        // Single-letter tags are the only ones relays index (NIP-01), so the subject has to be "p" for
-        // "ratings about this address" to be a query rather than a full scan.
-        ["p", rating.subject.toLowerCase()],
+        // Single-letter tags are the only ones relays index (NIP-01), so the subject needs one for
+        // "ratings about this address" to be a query rather than a full scan. It cannot be "p": that tag
+        // is reserved for a 32-byte Nostr pubkey and relays reject a 20-byte Ethereum address in it
+        // outright ("unexpected size for fixed-size tag: p"). "s" carries the subject instead, the same
+        // way offers use "d", "k" and "f" for values of their own shapes.
+        ["s", rating.subject.toLowerCase()],
         ["y", PROTOCOL_TAG],
         ["trade", rating.tradeId.toString()],
         ["score", String(rating.score)],
@@ -177,7 +180,7 @@ export async function parseRatingEvent(event: Event, opts: ParseRatingOptions = 
   if (tag(event, "d") !== ratingAddress(rating.chainId, rating.escrow, rating.tradeId, rating.rater)) {
     fail("tag_mismatch", "d tag must identify this rater and trade");
   }
-  if (tag(event, "p") !== rating.subject.toLowerCase()) fail("tag_mismatch", "p tag must be the subject");
+  if (tag(event, "s") !== rating.subject.toLowerCase()) fail("tag_mismatch", "s tag must be the subject");
   if (tag(event, "trade") !== rating.tradeId.toString()) fail("tag_mismatch", "trade tag mismatch");
   if (tag(event, "score") !== String(rating.score)) fail("tag_mismatch", "score tag mismatch");
   if (tag(event, "network") !== network(rating.chainId)) fail("tag_mismatch", "network tag mismatch");
@@ -274,7 +277,7 @@ export class RatingBook {
 
   filter(subject?: Address): Filter {
     const f: Filter = { kinds: [RATING_EVENT_KIND], "#y": [PROTOCOL_TAG] };
-    if (subject) f["#p"] = [subject.toLowerCase()];
+    if (subject) f["#s"] = [subject.toLowerCase()];
     return f;
   }
 

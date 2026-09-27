@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { verifyMessage, verifyTypedData } from "viem";
 import {
+  RatingBook,
   RatingEventError,
   buildRatingEvent,
   parseRatingEvent,
@@ -204,5 +205,33 @@ describe("summarising", () => {
     expect(ratingAddress(CHAIN_ID, ESCROW, 7n, "0xAbC0000000000000000000000000000000000000")).toBe(
       `${CHAIN_ID}:${ESCROW.toLowerCase()}:7:0xabc0000000000000000000000000000000000000`
     );
+  });
+});
+
+describe("relay compatibility", () => {
+  // The bug this exists to stop: the subject address sat in the "p" tag, which NIP-01 reserves for a
+  // 32-byte Nostr pubkey. Every real relay rejected it — "unexpected size for fixed-size tag: p" — so no
+  // rating ever published, and none of the verification tests noticed because they never used a relay.
+  it("never puts a non-pubkey in a tag reserved for pubkeys", async () => {
+    const { event } = await setup();
+    for (const t of event.tags) {
+      if (t[0] === "p" || t[0] === "e") {
+        expect(t[1], `${t[0]} tag must be 32-byte hex`).toMatch(/^[0-9a-f]{64}$/);
+      }
+    }
+  });
+
+  it("indexes the subject under a single-letter tag, so ratings can be queried at all", async () => {
+    const { rating, event } = await setup();
+    const subject = event.tags.find((t) => t[0] === "s");
+    expect(subject?.[1]).toBe(rating.subject.toLowerCase());
+  });
+
+  it("queries by the same tag it writes", async () => {
+    const { rating } = await setup();
+    const book = new RatingBook(["wss://example.invalid"], {});
+    const filter = book.filter(rating.subject);
+    expect(filter["#s"]).toEqual([rating.subject.toLowerCase()]);
+    expect(filter["#p"]).toBeUndefined();
   });
 });
