@@ -15,3 +15,4 @@ export * from "./evidence.js";
 export * from "./client.js";
 export { escrowCoreV4Abi } from "./abi/escrowCoreV4.js";
 export { licensedArbitratorAdapterAbi } from "./abi/licensedArbitratorAdapter.js";
+export * from "./ratings.js";
