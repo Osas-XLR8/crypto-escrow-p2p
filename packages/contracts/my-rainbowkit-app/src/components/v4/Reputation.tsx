@@ -42,6 +42,7 @@ const day = (ts: number) => new Date(ts * 1000).toLocaleDateString(undefined, { 
  */
 export function Reputation({ stats, address, detailed = false }: { stats?: PartyStats; address?: Address; detailed?: boolean }) {
   const activity = useWalletActivity(detailed ? address : undefined);
+  const { isLoading: historyLoading } = useV4Trades();
   // Each rating costs a chain read to check its trade, so this is for a counterparty you are looking at on
   // purpose — not for every card in a market list.
   const ratings = useRatingsFor(detailed ? address : undefined);
@@ -53,6 +54,17 @@ export function Reputation({ stats, address, detailed = false }: { stats?: Party
   // Seconds, not milliseconds: everything in this module works in the units the chain uses.
   const trust = stats ? confidence(stats, Math.floor(Date.now() / 1000)) : "none";
   const alarm = stats && disputeAlarm(stats);
+
+  // "No trades here yet" is a claim about a trader, and until the history has loaded it is a claim we
+  // cannot make. Saying it early libels the experienced ones for a second each time the market renders.
+  if (!stats && historyLoading) {
+    return (
+      <div className="row tiny" style={{ gap: 6 }}>
+        <span className="skeleton" style={{ width: 64, height: 14, display: "inline-block" }} />
+        <span className="skeleton" style={{ width: 86, height: 14, display: "inline-block" }} aria-label="Reading this trader's history" />
+      </div>
+    );
+  }
 
   if (!stats || stats.total === 0) {
     return (

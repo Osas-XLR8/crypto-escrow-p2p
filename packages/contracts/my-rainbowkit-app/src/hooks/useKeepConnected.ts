@@ -6,6 +6,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useAccount, useConfig, useReconnect } from "wagmi";
+import { recallDisconnected, rememberDisconnected } from "@/lib/v4/local";
 
 export function useKeepConnected() {
   const { isConnected, isConnecting, isReconnecting } = useAccount();
@@ -15,14 +16,18 @@ export function useKeepConnected() {
   // wagmi keeps `recentConnectorId` after an explicit disconnect, so that alone can't tell us whether the
   // user wants to be connected. A connection that disappears while this tab is open was dropped on purpose
   // (here or in another tab), and we leave it dropped until they connect again.
-  const [dismissed, setDismissed] = useState(false);
+  // Remembered across reloads too: otherwise a deliberate disconnect is forgotten by the next page load,
+  // which then tries to resume a session the wallet has revoked and waits on it indefinitely.
+  const [dismissed, setDismissed] = useState(() => recallDisconnected());
   const wasConnected = useRef(false);
   useEffect(() => {
     if (isConnected) {
       wasConnected.current = true;
       setDismissed(false);
+      rememberDisconnected(false);
     } else if (wasConnected.current) {
       setDismissed(true);
+      rememberDisconnected(true);
     }
   }, [isConnected]);
 

@@ -15,6 +15,7 @@ import { useFirmPanels } from "@/hooks/useFirmPanels";
 import { usePendingAction } from "@/hooks/usePendingAction";
 import { PendingNotice, pendingLabel } from "@/components/v4/Pending";
 import { DisputeWarning, Reputation, useReputation } from "@/components/v4/Reputation";
+import { useV4Trades } from "@/hooks/useV4Trades";
 import { ESTABLISHED_TRADES, filterOffers, sortOffers, type SortKey } from "@/lib/v4/marketFilters";
 import { completionRate, releaseTime } from "@/lib/v4/reputation";
 import { CHAIN_ID, FIAT_CURRENCIES, RELAYS, V4, arbitratorName } from "@/config/v4";
@@ -169,6 +170,48 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
     setView(next);
     rememberMarketView(next);
   }, []);
+
+  // Filters live in the URL as well, so a view survives a reload and can be handed to someone else:
+  // ?cur=NGN&amt=50000&pm=Opay&sort=release. Read once on mount and on back/forward; written as a
+  // replace, because changing a filter is refining one view rather than moving to a new one — otherwise
+  // the back button would walk keystroke by keystroke through everything you typed.
+  const urlWritten = useRef(false);
+  useEffect(() => {
+    const fromUrl = () => {
+      const q = new URLSearchParams(window.location.search);
+      const cur = FIAT_CURRENCIES.find((c) => c === q.get("cur"));
+      if (cur) setCurrency(cur);
+      const side = q.get("side");
+      if (side === "buy" || side === "sell") setIntent(side);
+      setWantFiat(q.get("amt") ?? "");
+      setMethodFilter(q.get("pm") ? q.get("pm")!.split(",").filter(Boolean) : []);
+      setEstablishedOnly(q.get("est") === "1");
+      const sort = q.get("sort");
+      if (sort === "price" || sort === "completion" || sort === "release") setSortBy(sort);
+    };
+    fromUrl();
+    window.addEventListener("popstate", fromUrl);
+    return () => window.removeEventListener("popstate", fromUrl);
+  }, []);
+
+  useEffect(() => {
+    if (mode !== "market") return;
+    // Skip the first run, so landing on a plain URL does not immediately rewrite it.
+    if (!urlWritten.current) {
+      urlWritten.current = true;
+      return;
+    }
+    const q = new URLSearchParams(window.location.search);
+    const put = (k: string, v: string | null) => (v ? q.set(k, v) : q.delete(k));
+    put("cur", currency === "NGN" ? null : currency);
+    put("side", intent === "buy" ? null : intent);
+    put("amt", wantFiat.trim() || null);
+    put("pm", methodFilter.length ? methodFilter.join(",") : null);
+    put("est", establishedOnly ? "1" : null);
+    put("sort", sortBy === "price" ? null : sortBy);
+    const search = q.toString();
+    window.history.replaceState(null, "", `${window.location.pathname}${search ? `?${search}` : ""}`);
+  }, [mode, currency, intent, wantFiat, methodFilter, establishedOnly, sortBy]);
 
   const [open, setOpen] = useState<{ hash: string; focusAmount: boolean } | null>(null);
 
@@ -329,7 +372,7 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
           </div>
           {filteredOut > 0 && (
             <div className="tiny faint" style={{ marginTop: 8 }}>
-              {filteredOut} offer{filteredOut === 1 ? "" : "s"} don&apos;t match these filters.{" "}
+              {filteredOut} offer{filteredOut === 1 ? " doesn't" : "s don't"} match these filters.{" "}
               <button type="button" className="linklike" onClick={() => { setWantFiat(""); setMethodFilter([]); setEstablishedOnly(false); }}>
                 Clear filters
               </button>
@@ -741,7 +784,10 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
 /** Completion and release time, compact enough for a table row. Same data as the card, fewer words. */
 function TableStats({ address }: { address: string }) {
   const reputationOf = useReputation();
+  const { isLoading: historyLoading } = useV4Trades();
   const stats = reputationOf(address);
+  // Same rule as the card: an unread history is not an empty one.
+  if (!stats && historyLoading) return <span className="skeleton" style={{ width: 96, height: 12, display: "inline-block" }} aria-label="Reading this trader's history" />;
   if (!stats || stats.total === 0) return <span className="faint">new here</span>;
   const rate = completionRate(stats);
   const release = releaseTime(stats);

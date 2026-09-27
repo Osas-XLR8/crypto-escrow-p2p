@@ -73,7 +73,22 @@ export class OfferBook {
   }
 
   async publish(event: Event, timeoutMs = RELAY_PUBLISH_TIMEOUT_MS): Promise<PublishResult[]> {
-    const results = await settleWithin(this.pool.publish(this.relays, event), timeoutMs);
+    let results = await settleWithin(this.pool.publish(this.relays, event), timeoutMs);
+
+    // One more go at the relays that didn't take it. A publish fails for two very different reasons: the
+    // relay rejected the event, which will happen again, or the connection was not ready, which usually
+    // will not. Retrying costs a second and turns "live on 2 of 3 relays" — an offer quietly less
+    // discoverable than its author believes — into a real answer either way.
+    const failed = results.flatMap((r, i) => (r.status === "rejected" ? [i] : []));
+    if (failed.length > 0) {
+      const retried = await settleWithin(this.pool.publish(failed.map((i) => this.relays[i]!), event), timeoutMs);
+      results = [...results];
+      failed.forEach((relayIndex, k) => {
+        const second = retried[k];
+        if (second?.status === "fulfilled") results[relayIndex] = second;
+      });
+    }
+
     return results.map((r, i) => ({
       relay: this.relays[i]!,
       ok: r.status === "fulfilled",

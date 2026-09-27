@@ -1,6 +1,6 @@
 // src/components/v4/CreateOfferForm.tsx — sign an offer (to sell or to buy) and publish it to Nostr relays.
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useWalletClient } from "wagmi";
 import { buildOfferEvent, createBuyOffer, createOffer, signOffer, type OfferSide, type OfferTerms, type PublishResult } from "@escrowx/sdk";
@@ -91,16 +91,28 @@ export function CreateOfferForm({ initialSide = "sell", onPublished }: { initial
     const seededRaw = vault.data;
     setF((s) => {
       const currentMax = parseTokenInput(s.max);
+      const floor = parseTokenInput(s.min);
       const capTooBig = !edited.current.has("max") && !!currentMax && currentMax > seededRaw;
-      return { ...s, total: seeded, max: capTooBig ? seeded : s.max };
+      const capped = floor && seededRaw < floor ? fmtToken(floor) : seeded;
+      return { ...s, total: seeded, max: capTooBig ? capped : s.max };
     });
   }, [selling, vault.data]);
 
-  // Same rule when the total is typed rather than seeded: an untouched cap follows it down.
-  useEffect(() => {
-    if (edited.current.has("max") || !total || !max || max <= total) return;
-    setF((s) => ({ ...s, max: fmtToken(total) }));
-  }, [total, max]);
+  // Adjusting the cap while someone is mid-number is how "50" becomes a cap of 5: the first keystroke is a
+  // total of 5, the cap follows it down, and the second keystroke leaves the cap stranded below the
+  // minimum. So nothing moves until the field is committed, and the cap never lands under the minimum —
+  // a cap below the floor is not a smaller offer, it is an impossible one. When the numbers still do not
+  // agree, the form says so rather than quietly rewriting what was typed.
+  const commitTotal = useCallback(() => {
+    setF((s) => {
+      const t = parseTokenInput(s.total);
+      const m = parseTokenInput(s.max);
+      const floor = parseTokenInput(s.min);
+      if (!t || !m || m <= t) return s;
+      const next = floor && t < floor ? floor : t;
+      return next === m ? s : { ...s, max: fmtToken(next) };
+    });
+  }, []);
 
   const overVault = selling && vault.data !== undefined && !!total && total > vault.data;
   const priceGap = reference.data?.median && priceOk
@@ -221,7 +233,7 @@ export function CreateOfferForm({ initialSide = "sell", onPublished }: { initial
               <input className="input mono" value={f.max} onChange={set("max")} inputMode="decimal" aria-label={`Largest single trade, in ${V4.tokenSymbol}`} />
             </Field>
             <Field label={selling ? "Total to sell" : "Total to buy"} hint={V4.tokenSymbol}>
-              <input className="input mono" value={f.total} onChange={set("total")} inputMode="decimal" aria-label={selling ? `Total ${V4.tokenSymbol} to sell` : `Total ${V4.tokenSymbol} to buy`} aria-invalid={overVault} />
+              <input className="input mono" value={f.total} onChange={set("total")} onBlur={commitTotal} inputMode="decimal" aria-label={selling ? `Total ${V4.tokenSymbol} to sell` : `Total ${V4.tokenSymbol} to buy`} aria-invalid={overVault} />
             </Field>
           </div>
           {!limitsOk && <p className="help warn-text">Limits must satisfy min ≤ max ≤ total.</p>}

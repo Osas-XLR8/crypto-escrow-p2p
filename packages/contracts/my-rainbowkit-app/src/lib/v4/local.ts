@@ -247,3 +247,27 @@ export function recallMarketView(): "table" | "cards" | null {
   const v = get(`escrowx:view:${scope}`);
   return v === "table" || v === "cards" ? v : null;
 }
+
+// ─── Did they disconnect on purpose? ──────────────────────────────────────────
+//
+// wagmi keeps `recentConnectorId` after an explicit disconnect, so on the next page load the app cannot
+// tell "they were connected last time" from "they chose to leave". Without this, a deliberate disconnect
+// followed by a reload spends forever trying to resume a session the wallet has already revoked, showing
+// "reconnecting your wallet…" over a page that should be showing the signed-out welcome.
+
+const DISCONNECTED_KEY = "escrowx:disconnected";
+
+export function rememberDisconnected(disconnected: boolean) {
+  if (disconnected) set(DISCONNECTED_KEY, "1");
+  else {
+    try {
+      localStorage.removeItem(DISCONNECTED_KEY);
+    } catch {
+      /* storage unavailable: the in-tab flag still governs this session */
+    }
+  }
+}
+
+export function recallDisconnected(): boolean {
+  return get(DISCONNECTED_KEY) === "1";
+}
