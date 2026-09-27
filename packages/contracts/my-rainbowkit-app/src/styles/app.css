@@ -462,3 +462,61 @@ select.input { padding-right: 28px; }
   border-bottom: 1px solid var(--border);
   background: var(--surface-2);
 }
+
+/* ─── Order-book table ──────────────────────────────────────────────────────
+   A market at a glance. The card is still the offer you consider; this is the
+   list you scan before choosing one. */
+.offer-tr {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(90px, 1fr) minmax(90px, 1.2fr) minmax(150px, 1.4fr) auto;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+.offer-tr:hover { background: var(--surface-2); }
+.offer-tr:focus-visible { outline: none; box-shadow: var(--ring); border-radius: 6px; }
+.offer-tr.is-open { background: var(--surface-2); border-bottom-color: transparent; }
+.offer-td { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.offer-td.action { justify-self: end; }
+.offer-expanded { border-bottom: 1px solid var(--border); background: var(--surface-2); }
+
+/* Narrow screens: the columns that earn their place are price, limits and the button. */
+@media (max-width: 720px) {
+  .offer-tr { grid-template-columns: 1fr auto auto; }
+  .offer-td.methods, .offer-td.stats { display: none; }
+}
+
+/* Phones: the expanded offer is a bottom sheet rather than an inline panel, so the list stays put
+   behind it and the card is reachable with a thumb. */
+@media (max-width: 480px) {
+  .offer-expanded {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 40;
+    max-height: 85vh;
+    overflow-y: auto;
+    border-top: 1px solid var(--border-strong);
+    border-radius: 14px 14px 0 0;
+    background: var(--surface);
+    box-shadow: 0 -10px 30px rgb(0 0 0 / 0.18);
+    animation: sheet-up .18s ease-out;
+  }
+  @keyframes sheet-up { from { transform: translateY(12px); opacity: .6; } to { transform: none; opacity: 1; } }
+}
+@media (prefers-reduced-motion: reduce) {
+  .offer-expanded { animation: none; }
+}
+
+/* The table's column labels. Not clickable, so none of the row's affordances apply. */
+.offer-th, .offer-th:hover {
+  cursor: default;
+  background: none;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-strong);
+}

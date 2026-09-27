@@ -233,3 +233,17 @@ export function recallRatingGiven(tradeId: bigint): 1 | -1 | null {
   const v = get(`escrowx:rated:${scope}:${tradeId}`);
   return v === "1" ? 1 : v === "-1" ? -1 : null;
 }
+
+// ─── Market view preference ───────────────────────────────────────────────────
+//
+// Which way someone likes to read a market is a preference, not a setting worth a screen. Remembered per
+// device; losing it just means the default again.
+
+export function rememberMarketView(view: "table" | "cards") {
+  set(`escrowx:view:${scope}`, view);
+}
+
+export function recallMarketView(): "table" | "cards" | null {
+  const v = get(`escrowx:view:${scope}`);
+  return v === "table" || v === "cards" ? v : null;
+}

@@ -5,7 +5,7 @@
 //   • "Sell" — buy offers: someone wants crypto; you fill it, YOUR crypto locks, they pay you fiat.
 // mode="mine" lists the connected wallet's own offers on both sides.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { erc20Abi, formatEther } from "viem";
 import { usePublicClient } from "wagmi";
@@ -16,10 +16,11 @@ import { usePendingAction } from "@/hooks/usePendingAction";
 import { PendingNotice, pendingLabel } from "@/components/v4/Pending";
 import { DisputeWarning, Reputation, useReputation } from "@/components/v4/Reputation";
 import { ESTABLISHED_TRADES, filterOffers, sortOffers, type SortKey } from "@/lib/v4/marketFilters";
+import { completionRate, releaseTime } from "@/lib/v4/reputation";
 import { CHAIN_ID, FIAT_CURRENCIES, RELAYS, V4, arbitratorName } from "@/config/v4";
 import { Addr, Button, Card, Chip, Empty, Notice, errorText } from "@/components/ui";
 import { fmtDuration } from "@/lib/format";
-import { blockedAddresses, fmtFiat, fmtToken, parseTokenInput, rememberTradeTerms, rememberTradeTx, termsFromOffer } from "@/lib/v4/local";
+import { blockedAddresses, fmtFiat, fmtToken, parseTokenInput, recallMarketView, rememberMarketView, rememberTradeTerms, rememberTradeTx, termsFromOffer } from "@/lib/v4/local";
 
 /** Below this, a "median" is just one person's opinion. */
 const MIN_FOR_MEDIAN = 3;
@@ -155,6 +156,52 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
   const [establishedOnly, setEstablishedOnly] = useState(false);
   const [sortBy, setSortBy] = useState<SortKey>("price");
 
+  // ─── Table view and the open row ───────────────────────────────────────────
+  //
+  // The table is the market at a glance; the card is the offer you are considering. One row opens at a
+  // time, because two open cards is a list you have to scroll past rather than compare.
+  const [view, setView] = useState<"table" | "cards">("table");
+  useEffect(() => {
+    const saved = recallMarketView();
+    if (saved) setView(saved);
+  }, []);
+  const chooseView = useCallback((next: "table" | "cards") => {
+    setView(next);
+    rememberMarketView(next);
+  }, []);
+
+  const [open, setOpen] = useState<{ hash: string; focusAmount: boolean } | null>(null);
+
+  // The open row lives in the URL, so a link to an offer is just the page you are looking at. Back closes
+  // it rather than leaving the app, which is what a browser's back button means to everyone who isn't us.
+  const openOffer = useCallback((hash: string | null, focusAmount = false) => {
+    setOpen(hash ? { hash, focusAmount } : null);
+    const url = new URL(window.location.href);
+    if (hash) url.searchParams.set("offer", hash);
+    else url.searchParams.delete("offer");
+    window.history.pushState(null, "", `${url.pathname}${url.search}`);
+  }, []);
+
+  useEffect(() => {
+    const fromUrl = () => {
+      const hash = new URLSearchParams(window.location.search).get("offer");
+      setOpen(hash ? { hash, focusAmount: false } : null);
+    };
+    fromUrl();
+    window.addEventListener("popstate", fromUrl);
+    return () => window.removeEventListener("popstate", fromUrl);
+  }, []);
+
+  // Escape closes the open row wherever focus happens to be.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") openOffer(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, openOffer]);
+
   const visible = mode === "mine" ? offers : live;
   const hidden = mode === "mine" ? 0 : visible.filter((o) => blocked.includes(o.maker.toLowerCase())).length;
   const unblocked = mode === "mine" ? offers : visible.filter((o) => !blocked.includes(o.maker.toLowerCase()));
@@ -269,6 +316,10 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
               {ESTABLISHED_TRADES}+ trades only
             </button>
             <span style={{ flex: 1 }} />
+            <div className="segmented" role="group" aria-label="How to show offers">
+              <button aria-pressed={view === "table"} onClick={() => chooseView("table")} title="Compact list">Table</button>
+              <button aria-pressed={view === "cards"} onClick={() => chooseView("cards")} title="Full cards">Cards</button>
+            </div>
             <label className="tiny faint" htmlFor="sort-by">Sort by</label>
             <select id="sort-by" className="input" style={{ width: "auto" }} value={sortBy} onChange={(e) => setSortBy(e.target.value as SortKey)} aria-label="Sort offers by">
               <option value="price">Best price</option>
@@ -323,27 +374,82 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
         </div>
       )}
       <div>
-        {shown.map((o, i) => (
-          <OfferRow
-            key={o.offerHash}
-            offer={o}
-            reference={median}
-            intent={intent}
-            best={mode === "market" && i === 0 && shown.length > 1}
-            remaining={remaining.data?.[o.offerHash]}
-            funds={funds.data}
-            isMine={!!address && o.maker.toLowerCase() === address.toLowerCase()}
-            onTaken={(id) => {
-              rememberTradeTerms(id, termsFromOffer(o)); // price, side and the maker's verified chat key
-              onTradeOpened?.(id);
-            }}
-            onChanged={() => {
-              void remaining.refetch();
-              void funds.refetch();
-              void load();
-            }}
-          />
-        ))}
+        {/* Column labels. A bare "1,600" is not a price — the table has to say what it is per, the same way
+            the card's "1,600 NGN per tUSDT" does, or the number means nothing to someone arriving cold. */}
+        {mode === "market" && view === "table" && shown.length > 0 && (
+          <div className="offer-tr offer-th" aria-hidden={false} role="row">
+            <span className="offer-td tiny faint">Price · {currency} per {SYM}</span>
+            <span className="offer-td limits tiny faint">Per trade ({SYM})</span>
+            <span className="offer-td methods tiny faint">Payment</span>
+            <span className="offer-td stats tiny faint">Trades · completed · releases in</span>
+            <span className="offer-td action tiny faint">&nbsp;</span>
+          </div>
+        )}
+        {shown.map((o, i) => {
+          const card = (
+            <OfferRow
+              offer={o}
+              reference={median}
+              intent={intent}
+              best={mode === "market" && i === 0 && shown.length > 1}
+              remaining={remaining.data?.[o.offerHash]}
+              funds={funds.data}
+              isMine={!!address && o.maker.toLowerCase() === address.toLowerCase()}
+              autoFocus={open?.hash === o.offerHash && open.focusAmount}
+              onTaken={(id) => {
+                rememberTradeTerms(id, termsFromOffer(o)); // price, side and the maker's verified chat key
+                onTradeOpened?.(id);
+              }}
+              onChanged={() => {
+                void remaining.refetch();
+                void funds.refetch();
+                void load();
+              }}
+            />
+          );
+          if (mode === "mine" || view === "cards") return <Fragment key={o.offerHash}>{card}</Fragment>;
+          const isOpen = open?.hash === o.offerHash;
+          return (
+            <Fragment key={o.offerHash}>
+              <div
+                className={`offer-tr ${isOpen ? "is-open" : ""}`}
+                role="button"
+                tabIndex={0}
+                aria-expanded={isOpen}
+                aria-label={`${o.terms.price} ${o.terms.fiatCurrency} per ${SYM} from ${o.maker.slice(0, 8)}`}
+                onClick={() => openOffer(isOpen ? null : o.offerHash)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    openOffer(isOpen ? null : o.offerHash);
+                  }
+                }}
+              >
+                <span className="offer-td price mono strong">
+                  {Number(o.terms.price).toLocaleString("en-US")} <span className="faint">{o.terms.fiatCurrency}</span>
+                </span>
+                <span className="offer-td limits mono tiny">
+                  {fmtToken(o.offer.minAmount)}–{fmtToken(remaining.data?.[o.offerHash] ?? o.offer.maxAmount)}
+                </span>
+                <span className="offer-td methods tiny faint">{o.terms.paymentMethods.slice(0, 2).join(", ")}</span>
+                <span className="offer-td stats tiny"><TableStats address={o.maker} /></span>
+                {/* The wrapper stops the click reaching the row, so Buy means "open and focus" rather than
+                    "open, then immediately toggle shut again". */}
+                <span className="offer-td action" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                  <Button
+                    size="sm"
+                    variant={isOpen ? "ghost" : "accent"}
+                    // Never opens a trade in one click: it expands the row and puts the cursor in the box.
+                    onClick={() => openOffer(isOpen ? null : o.offerHash, true)}
+                  >
+                    {isOpen ? "Close" : intent === "buy" ? "Buy" : "Sell"}
+                  </Button>
+                </span>
+              </div>
+              {isOpen && <div className="offer-expanded">{card}</div>}
+            </Fragment>
+          );
+        })}
       </div>
     </>
   );
@@ -384,7 +490,7 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
   );
 }
 
-function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, onTaken, onChanged }: {
+function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, onTaken, onChanged, autoFocus = false }: {
   offer: ParsedOffer;
   best: boolean;
   /** Median price of the offers listed beside this one, when there are enough to mean anything. */
@@ -395,6 +501,8 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
   isMine: boolean;
   onTaken: (tradeId: bigint) => void;
   onChanged: () => void;
+  /** Opened deliberately (the Buy button on a collapsed row), so the amount box should be ready to type in. */
+  autoFocus?: boolean;
 }) {
   const { address, client, book, identity, unlockMessaging } = useEscrowX();
   const { status: panelStatus } = useFirmPanels();
@@ -402,6 +510,12 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
   const { offer: o, terms, side } = offer;
   const firm = panelStatus(o.arbitrator);
   const [amount, setAmount] = useState("");
+  // Buy on a collapsed row expands it and puts the cursor in the amount box, so the next thing you do is
+  // type rather than hunt. Deliberately never steals focus when a row opens some other way.
+  const amountRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (autoFocus) amountRef.current?.focus();
+  }, [autoFocus]);
   const pending = usePendingAction();
   const busy = pending.busy;
 
@@ -557,7 +671,7 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
           ) : (
             <>
               <div className="input-affix">
-                <input className="input mono" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder={`${fmtToken(o.minAmount)} – ${fmtToken(cap)}`} inputMode="decimal" aria-label={`Amount of ${terms.tokenSymbol} to ${actionLabel.toLowerCase()}`} />
+                <input ref={amountRef} className="input mono" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder={`${fmtToken(o.minAmount)} – ${fmtToken(cap)}`} inputMode="decimal" aria-label={`Amount of ${terms.tokenSymbol} to ${actionLabel.toLowerCase()}`} />
                 <span className="affix">{terms.tokenSymbol}</span>
               </div>
               {amountProblem && <div className="tiny" role="alert" style={{ color: "var(--danger)" }}>{amountProblem}</div>}
@@ -621,5 +735,21 @@ function OfferRow({ offer, best, reference, intent, remaining, funds, isMine, on
       )}
       <PendingNotice pending={pending} />
     </article>
+  );
+}
+
+/** Completion and release time, compact enough for a table row. Same data as the card, fewer words. */
+function TableStats({ address }: { address: string }) {
+  const reputationOf = useReputation();
+  const stats = reputationOf(address);
+  if (!stats || stats.total === 0) return <span className="faint">new here</span>;
+  const rate = completionRate(stats);
+  const release = releaseTime(stats);
+  return (
+    <span className="row" style={{ gap: 8 }}>
+      <span className="mono">{stats.total} trade{stats.total === 1 ? "" : "s"}</span>
+      {rate !== undefined && <span className="mono">{Math.round(rate * 100)}%</span>}
+      {release && <span className="faint">{release.seconds < 60 ? "<1m" : fmtDuration(release.seconds)}</span>}
+    </span>
   );
 }
