@@ -172,3 +172,58 @@ describe("TradeChat over relays", () => {
     }
   });
 });
+
+describe("verification caching", () => {
+  it("does not let one failed chain call hide an offer for good", async () => {
+    // The signature and binding verifiers answer true/false and return false when the chain call throws,
+    // so a dropped request is indistinguishable from a forgery. If that verdict were cached, a passing
+    // network blip would empty the market until the page was reloaded — which is exactly what happened.
+    const seller = await party();
+    const { offer, signature, terms: t } = await signedOffer(seller);
+    const event = buildOfferEvent({ offer, signature, terms: t, binding: seller.binding, identity: seller.identity });
+
+    let calls = 0;
+    const flaky = {
+      verifyTypedData: async (args: never) => {
+        calls++;
+        if (calls === 1) throw new Error("RPC unavailable");
+        const { verifyTypedData } = await import("viem");
+        return verifyTypedData(args);
+      },
+      verifyMessage: async (args: never) => {
+        const { verifyMessage } = await import("viem");
+        return verifyMessage(args);
+      },
+    } as never;
+
+    const book = new OfferBook([relayA.url], { publicClient: flaky }, pool);
+    const first = await book.verify([event], { chainId: CHAIN_ID });
+    expect(first.offers).toHaveLength(0); // the blip looks like a bad signature
+
+    const second = await book.verify([event], { chainId: CHAIN_ID });
+    expect(second.offers).toHaveLength(1); // ...and asking again finds the offer, rather than the cached "no"
+  });
+
+  it("still remembers a verdict the event's own bytes force", async () => {
+    const seller = await party();
+    const { offer, signature, terms: t } = await signedOffer(seller);
+    const good = buildOfferEvent({ offer, signature, terms: t, binding: seller.binding, identity: seller.identity });
+    // Rebuild into a clean object so the tampering is actually seen, then break the content.
+    const tampered = {
+      id: good.id, pubkey: good.pubkey, created_at: good.created_at, kind: good.kind,
+      tags: good.tags, content: "not json at all", sig: good.sig,
+    };
+
+    let chainCalls = 0;
+    const counting = {
+      verifyTypedData: async () => { chainCalls++; return true; },
+      verifyMessage: async () => { chainCalls++; return true; },
+    } as never;
+
+    const book = new OfferBook([relayA.url], { publicClient: counting }, pool);
+    await book.verify([tampered], { chainId: CHAIN_ID });
+    const before = chainCalls;
+    await book.verify([tampered], { chainId: CHAIN_ID });
+    expect(chainCalls).toBe(before); // no second round trip for an answer the bytes already gave
+  });
+});

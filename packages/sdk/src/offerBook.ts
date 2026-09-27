@@ -3,7 +3,7 @@
 
 import { SimplePool } from "nostr-tools/pool";
 import type { Event, Filter } from "nostr-tools";
-import { OFFER_EVENT_KIND, OfferEventError, PROTOCOL_TAG, parseOfferEvent, type ParseOptions, type ParsedOffer } from "./offerEvents.js";
+import { OFFER_EVENT_KIND, OfferEventError, PROTOCOL_TAG, parseOfferEvent, type OfferRejection, type ParseOptions, type ParsedOffer } from "./offerEvents.js";
 import { RELAY_PUBLISH_TIMEOUT_MS, settleWithin } from "./relayTimeout.js";
 import type { OfferSide } from "./types.js";
 
@@ -29,6 +29,21 @@ export interface PublishResult {
   ok: boolean;
   message: string;
 }
+
+/**
+ * Rejections decided entirely by the event itself — no network, so no retry can change the answer.
+ *
+ * Everything else stays uncached on purpose. Signature and binding checks may reach the chain, and both
+ * report failure as `false` rather than throwing, so a transient RPC error is indistinguishable from a
+ * forgery. A wrong "no" that never gets re-asked is worse than asking twice.
+ */
+const CACHEABLE_REJECTIONS = new Set<OfferRejection>([
+  "wrong_kind",
+  "malformed_content",
+  "terms_mismatch",
+  "tag_mismatch",
+  "bad_nostr_signature",
+]);
 
 export class OfferBook {
   readonly pool: SimplePool;
@@ -97,9 +112,12 @@ export class OfferBook {
           this.remember(event.id, { offer });
           return { event, offer };
         } catch (e) {
-          // Only cache a verdict about the event itself. "Expired" is a verdict about the clock, and
-          // "wrong_network" about the query, and both can differ on the next call with the same event.
-          if (e instanceof OfferEventError && e.reason !== "expired" && e.reason !== "wrong_network") {
+          // Only cache a rejection that the event's own bytes force, and that no amount of retrying could
+          // change. The dangerous ones are bad_offer_signature and bad_binding: both verifiers answer a
+          // bare true/false and return false when the chain call throws, so a dropped request looks exactly
+          // like a forgery. Caching that would hide a real offer for as long as the page stays open —
+          // which is precisely what it did, as an intermittently empty market.
+          if (e instanceof OfferEventError && CACHEABLE_REJECTIONS.has(e.reason)) {
             this.remember(event.id, { error: e });
           }
           return { event, error: e };
