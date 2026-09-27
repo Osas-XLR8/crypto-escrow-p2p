@@ -2,6 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 import { explorerAddress, explorerTx } from "@/config/v4";
+import { openTrader } from "@/lib/v4/nav";
 
 export function Card({ title, sub, right, children, flush = false, className = "" }: {
   title?: ReactNode;
@@ -123,11 +124,18 @@ export function CopyButton({ value, label = "Copy" }: { value: string; label?: s
 }
 
 /** Shortened address with copy + explorer link. */
-export function Addr({ address, you, full = false }: { address: string; you?: boolean; full?: boolean }) {
+export function Addr({ address, you, full = false, link = true }: { address: string; you?: boolean; full?: boolean; link?: boolean }) {
   const href = explorerAddress(address);
+  const short = full ? address : `${address.slice(0, 6)}…${address.slice(-4)}`;
   return (
     <span className="addr">
-      <span title={address}>{full ? address : `${address.slice(0, 6)}…${address.slice(-4)}`}</span>
+      {link ? (
+        <button type="button" className="addr-link" title={`${address} — open this trader's record`} onClick={() => openTrader(address)}>
+          {short}
+        </button>
+      ) : (
+        <span title={address}>{short}</span>
+      )}
       {you && <span className="chip" style={{ marginLeft: 4 }}>you</span>}
       <CopyButton value={address} label="Copy address" />
       {href && <a className="icon-btn" href={href} target="_blank" rel="noreferrer" title="View on explorer" aria-label="View on explorer">↗</a>}

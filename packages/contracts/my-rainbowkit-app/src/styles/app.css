@@ -520,3 +520,19 @@ select.input { padding-right: 28px; }
   padding-bottom: 10px;
   border-bottom: 1px solid var(--border-strong);
 }
+
+/* A trader's numbers, sized so the whole record is one glance rather than a scroll. */
+.profile-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 16px 20px;
+}
+
+/* An address that opens its owner's record. Reads as the address it is, not as a button. */
+.addr-link {
+  background: none; border: 0; padding: 0; font: inherit; color: inherit;
+  cursor: pointer; text-decoration: underline; text-decoration-style: dotted;
+  text-underline-offset: 3px; text-decoration-color: var(--border-strong);
+}
+.addr-link:hover { text-decoration-color: var(--accent); color: var(--accent); }
+.addr-link:focus-visible { outline: none; box-shadow: var(--ring); border-radius: 3px; }

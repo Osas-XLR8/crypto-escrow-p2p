@@ -16,6 +16,7 @@ import { usePendingAction } from "@/hooks/usePendingAction";
 import { PendingNotice, pendingLabel } from "@/components/v4/Pending";
 import { DisputeWarning, Reputation, useReputation } from "@/components/v4/Reputation";
 import { useV4Trades } from "@/hooks/useV4Trades";
+import { openTrader } from "@/lib/v4/nav";
 import { ESTABLISHED_TRADES, filterOffers, sortOffers, type SortKey } from "@/lib/v4/marketFilters";
 import { completionRate, releaseTime } from "@/lib/v4/reputation";
 import { CHAIN_ID, FIAT_CURRENCIES, RELAYS, V4, arbitratorName } from "@/config/v4";
@@ -475,7 +476,20 @@ export function OfferMarket({ mode = "market", onTradeOpened, onCreateOffer }: {
                   {fmtToken(o.offer.minAmount)}–{fmtToken(remaining.data?.[o.offerHash] ?? o.offer.maxAmount)}
                 </span>
                 <span className="offer-td methods tiny faint">{o.terms.paymentMethods.slice(0, 2).join(", ")}</span>
-                <span className="offer-td stats tiny"><TableStats address={o.maker} /></span>
+                {/* Who, as well as how good. A row of statistics with no name behind it gives no way to
+                    look someone up, and "check who you are dealing with" is the whole point of the column. */}
+                <span className="offer-td stats tiny" onClick={(e) => e.stopPropagation()}>
+                  <TableStats address={o.maker} />
+                  <button
+                    type="button"
+                    className="addr-link mono"
+                    style={{ marginLeft: 8 }}
+                    title={`${o.maker} — open this trader's record`}
+                    onClick={() => openTrader(o.maker)}
+                  >
+                    {o.maker.slice(0, 6)}…
+                  </button>
+                </span>
                 {/* The wrapper stops the click reaching the row, so Buy means "open and focus" rather than
                     "open, then immediately toggle shut again". */}
                 <span className="offer-td action" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>

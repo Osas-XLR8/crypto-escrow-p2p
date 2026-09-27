@@ -18,6 +18,7 @@ import { VaultPanel } from "@/components/v4/VaultPanel";
 import { TradesPanel } from "@/components/v4/TradesPanel";
 import { TradeDetail } from "@/components/v4/TradeDetail";
 import { GettingStarted } from "@/components/v4/GettingStarted";
+import { MerchantProfile } from "@/components/v4/MerchantProfile";
 import { useV4Trades, type V4TradesResult } from "@/hooks/useV4Trades";
 import { useTradeAlerts } from "@/hooks/useTradeAlerts";
 import { nextStep } from "@/lib/v4/tradeIndex";
@@ -30,6 +31,7 @@ export default function Home() {
   const { address } = useAccount();
   const [tab, setTab] = useState<Tab>("market");
   const [selected, setSelected] = useState<bigint | undefined>();
+  const [trader, setTrader] = useState<`0x${string}` | undefined>();
   const trades = useV4Trades();
 
   // The URL is the only thing a person can copy, bookmark or hand to someone else. It should say where they
@@ -57,6 +59,9 @@ export default function Home() {
       const params = new URLSearchParams(window.location.search);
       const t = params.get("trade");
       const requested = params.get("tab");
+      const who = params.get("trader");
+      setTrader(who && /^0x[0-9a-fA-F]{40}$/.test(who) ? (who as `0x${string}`) : undefined);
+      if (who) return; // a profile is its own view; leave the tab underneath as it was
       if (t && /^\d+$/.test(t)) {
         setSelected(BigInt(t));
         setTab("trades");
@@ -93,18 +98,20 @@ export default function Home() {
         <meta name="twitter:image" content={`${SITE_URL}og.png`} />
       </Head>
       <MessagesProvider trades={trades.trades} onOpenTrade={selectTrade}>
-        <App tab={tab} go={go} selected={selected} selectTrade={selectTrade} trades={trades} />
+        <App tab={tab} go={go} selected={selected} selectTrade={selectTrade} trades={trades} trader={trader} />
       </MessagesProvider>
     </>
   );
 }
 
-function App({ tab, go, selected, selectTrade, trades }: {
+function App({ tab, go, selected, selectTrade, trades, trader }: {
   tab: Tab;
   go: (t: Tab) => void;
   selected?: bigint;
   selectTrade: (id: bigint) => void;
   trades: V4TradesResult;
+  /** A trader's record, opened from any address in the app. Takes over the view while it is set. */
+  trader?: `0x${string}`;
 }) {
   const { address } = useAccount();
   // While a session is being restored we render what a connected user sees, so a returning visitor never
@@ -145,11 +152,15 @@ function App({ tab, go, selected, selectTrade, trades }: {
         </Notice>
       )}
 
-      {!isConnected && !resuming && tab === "market" && <Hero />}
+      {!isConnected && !resuming && tab === "market" && !trader && <Hero />}
       {resuming && <ResumingNotice />}
-      {isConnected && <GettingStarted />}
+      {isConnected && !trader && <GettingStarted />}
 
-      {tab === "market" && (
+      {/* A trader's record takes the whole view: it is what you came to read, and the market is one click
+          back. Everything else stays mounted underneath so returning costs nothing. */}
+      {trader && <MerchantProfile address={trader} />}
+
+      {!trader && tab === "market" && (
         <OfferMarket
           onTradeOpened={selectTrade}
           onCreateOffer={(side) => {
@@ -159,7 +170,7 @@ function App({ tab, go, selected, selectTrade, trades }: {
         />
       )}
 
-      {tab === "offers" && (isConnected ? (
+      {!trader && tab === "offers" && (isConnected ? (
         <div className="split split-sell">
           <div className="stack sticky">
             <VaultPanel />
@@ -175,7 +186,7 @@ function App({ tab, go, selected, selectTrade, trades }: {
         <ConnectPrompt what="post offers" />
       ))}
 
-      {tab === "trades" && (isConnected ? (
+      {!trader && tab === "trades" && (isConnected ? (
         <div className="split split-trades">
           <div className="sticky">
             <TradesPanel
